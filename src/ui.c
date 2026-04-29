@@ -109,7 +109,8 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
         mvwprintw(win_details, 5, 2, "Current Ticket: %s", a->current_ticket);
         mvwprintw(win_details, 6, 2, "Last Heartbeat: %d seconds ago", a->last_heartbeat);
 
-        mvwprintw(win_details, 9, 2, "Tmux Session: agent:%s", a->name);
+        mvwprintw(win_details, 9, 2, "Tmux Session: mei");
+        mvwprintw(win_details, 10, 2, "Tmux Window: %s", a->name);
         
         // Mock some stats/graphs
         mvwprintw(win_details, 11, 2, "CPU Usage: [||||||    ] 60%%");

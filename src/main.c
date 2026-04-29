@@ -59,8 +59,9 @@ int main(int argc, char *argv[]) {
             case 'a':
             case 'A':
                 if (agent_count > 0) {
-                    char cmd[256];
-                    snprintf(cmd, sizeof(cmd), "tmux attach -t agent:%s", agents[selected_agent].name);
+                    char cmd[512];
+                    // Select the window first, then attach to the session
+                    snprintf(cmd, sizeof(cmd), "tmux select-window -t mei:\"%s\"; tmux attach -t mei", agents[selected_agent].name);
                     
                     def_prog_mode();
                     endwin();

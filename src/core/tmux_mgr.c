@@ -3,34 +3,41 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool tmux_session_exists(const char *agent_name) {
+#define TMUX_SESSION "mei"
+
+static void ensure_session_exists() {
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "tmux has-session -t agent:%s 2>/dev/null", agent_name);
+    snprintf(cmd, sizeof(cmd), "tmux has-session -t %s 2>/dev/null", TMUX_SESSION);
+    if (system(cmd) != 0) {
+        snprintf(cmd, sizeof(cmd), "tmux new-session -d -s %s", TMUX_SESSION);
+        system(cmd);
+    }
+}
+
+bool tmux_session_exists(const char *agent_name) {
+    char cmd[512];
+    // Check if the window exists in our session
+    snprintf(cmd, sizeof(cmd), "tmux list-windows -t %s -F \"#W\" 2>/dev/null | grep -qx \"%s\"", TMUX_SESSION, agent_name);
     int status = system(cmd);
     return (status == 0);
 }
 
 bool tmux_spawn_agent(const char *agent_name, const char *cli_command, const char *workspace) {
+    ensure_session_exists();
+
     if (tmux_session_exists(agent_name)) {
         return true; // Already running
     }
     
-    char cmd[1024];
-    // Start detached session with the agent name in the given workspace.
-    // We start 'sh' and then send the command to ensure we have a shell.
-    snprintf(cmd, sizeof(cmd), "cd %s && tmux new-session -d -s agent:%s", workspace, agent_name);
-    
-    if (system(cmd) != 0) {
-        return false;
-    }
-
-    // Send the CLI command if provided
+    char cmd[2048];
+    // Create a new window in the existing session
     if (cli_command && strlen(cli_command) > 0) {
-        snprintf(cmd, sizeof(cmd), "tmux send-keys -t agent:%s \"%s\" C-m", agent_name, cli_command);
-        system(cmd);
+        snprintf(cmd, sizeof(cmd), "tmux new-window -d -t %s -n \"%s\" -c \"%s\" \"%s\"", TMUX_SESSION, agent_name, workspace, cli_command);
+    } else {
+        snprintf(cmd, sizeof(cmd), "tmux new-window -d -t %s -n \"%s\" -c \"%s\"", TMUX_SESSION, agent_name, workspace);
     }
-
-    return true;
+    
+    return (system(cmd) == 0);
 }
 
 bool tmux_kill_agent(const char *agent_name) {
@@ -39,7 +46,7 @@ bool tmux_kill_agent(const char *agent_name) {
     }
     
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "tmux kill-session -t agent:%s", agent_name);
+    snprintf(cmd, sizeof(cmd), "tmux kill-window -t %s:\"%s\"", TMUX_SESSION, agent_name);
     return (system(cmd) == 0);
 }
 
@@ -48,11 +55,7 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
         return false;
     }
 
-    // Escape quotes and special characters could be complex here, assuming sanitized payload or simple text
-    // A robust implementation would write the payload to a temp file and send `cat /tmp/file` or use `load-buffer`
     char cmd[4096];
-    
-    // Using load-buffer and paste-buffer is safer for multiline / complex payloads in tmux
     char tmp_file[256];
     snprintf(tmp_file, sizeof(tmp_file), "/tmp/pulse_%s.txt", agent_name);
     
@@ -61,7 +64,8 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     fprintf(f, "%s", pulse_payload);
     fclose(f);
 
-    snprintf(cmd, sizeof(cmd), "tmux load-buffer %s && tmux paste-buffer -t agent:%s && tmux send-keys -t agent:%s C-m", tmp_file, agent_name, agent_name);
+    snprintf(cmd, sizeof(cmd), "tmux load-buffer %s && tmux paste-buffer -t %s:\"%s\" && tmux send-keys -t %s:\"%s\" C-m", 
+             tmp_file, TMUX_SESSION, agent_name, TMUX_SESSION, agent_name);
     int res = system(cmd);
     
     remove(tmp_file);
@@ -74,8 +78,7 @@ int tmux_capture_output(const char *agent_name, char *buffer, size_t max_size) {
     }
 
     char cmd[256];
-    // -p prints to stdout
-    snprintf(cmd, sizeof(cmd), "tmux capture-pane -p -t agent:%s", agent_name);
+    snprintf(cmd, sizeof(cmd), "tmux capture-pane -p -t %s:\"%s\"", TMUX_SESSION, agent_name);
     
     FILE *fp = popen(cmd, "r");
     if (!fp) {
@@ -96,3 +99,4 @@ int tmux_capture_output(const char *agent_name, char *buffer, size_t max_size) {
     
     return total_read;
 }
+

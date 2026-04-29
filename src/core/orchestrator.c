@@ -105,4 +105,6 @@ void orchestrator_shutdown(Agent *agents, int agent_count) {
             tmux_kill_agent(agents[i].name);
         }
     }
+    // Finally, kill the entire session
+    system("tmux kill-session -t mei 2>/dev/null");
 }

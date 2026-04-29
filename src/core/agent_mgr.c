@@ -13,7 +13,7 @@ int agent_mgr_load_all(Agent *agents) {
     }
 
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "fossil ls -R %s 2>/dev/null", repo_path);
+    snprintf(cmd, sizeof(cmd), "fossil ls -r trunk -R %s 2>/dev/null", repo_path);
     
     FILE *ls_fp = popen(cmd, "r");
     if (ls_fp) {
@@ -29,7 +29,7 @@ int agent_mgr_load_all(Agent *agents) {
                     
                     // Now read the file contents using fossil cat
                     char cat_cmd[2048];
-                    snprintf(cat_cmd, sizeof(cat_cmd), "fossil cat \"%s\" -R %s 2>/dev/null", filename, repo_path);
+                    snprintf(cat_cmd, sizeof(cat_cmd), "fossil cat \"%s\" -r trunk -R %s 2>/dev/null", filename, repo_path);
                     
                     FILE *cat_fp = popen(cat_cmd, "r");
                     if (cat_fp) {
