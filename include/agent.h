@@ -1,0 +1,28 @@
+#ifndef AGENT_H
+#define AGENT_H
+
+typedef enum {
+    AGENT_STATE_OPEN,
+    AGENT_STATE_IN_PROGRESS,
+    AGENT_STATE_REVIEW,
+    AGENT_STATE_BLOCKED,
+    AGENT_STATE_DONE,
+    AGENT_STATE_PAUSED,
+    AGENT_STATE_OFFLINE
+} AgentState;
+
+typedef struct {
+    char name[64];
+    char role[64];
+    AgentState state;
+    int last_heartbeat; // simulated seconds ago
+    char current_ticket[64];
+} Agent;
+
+#define MAX_AGENTS 100
+
+// Mock data generation
+void mock_agents(Agent *agents, int *count);
+const char* state_to_string(AgentState state);
+
+#endif // AGENT_H
