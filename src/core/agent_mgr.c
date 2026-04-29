@@ -9,8 +9,7 @@ int agent_mgr_load_all(Agent *agents) {
     const char *repo_path = fossil_get_repo_path();
     
     if (!repo_path || strlen(repo_path) == 0) {
-        mock_agents(agents, &count);
-        return count;
+        return 0;
     }
 
     char cmd[1024];
@@ -65,10 +64,5 @@ int agent_mgr_load_all(Agent *agents) {
         pclose(ls_fp);
     }
     
-    // Fallback if no agents found to the mock functionality
-    if (count == 0) {
-        mock_agents(agents, &count);
-    }
-
     return count;
 }

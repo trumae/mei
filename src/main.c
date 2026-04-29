@@ -14,7 +14,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    const char *repo_path = argv[1];
+    char abs_repo_path[4096];
+    if (realpath(argv[1], abs_repo_path) == NULL) {
+        printf("Error: Could not resolve path to %s\n", argv[1]);
+        return 1;
+    }
+
+    const char *repo_path = abs_repo_path;
     fossil_set_repo_path(repo_path);
 
     Agent agents[MAX_AGENTS];
