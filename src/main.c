@@ -2,53 +2,87 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 #include <ncurses.h>
 #include "ui.h"
 #include "agent.h"
 #include "core/orchestrator.h"
 #include "core/fossil_skill.h"
 
+// Global state for signal handler
+static Agent *g_agents = NULL;
+static int g_agent_count = 0;
+static int g_running = 1;
+
+void handle_sigint(int sig) {
+    (void)sig;
+    g_running = 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Usage: %s <path_to_fossil_repo.fossil>\n", argv[0]);
+        printf("Usage: %s <path_to_fossil_repo.fossil> [--clean]\n", argv[0]);
+        return 1;
+    }
+
+    const char *repo_arg = NULL;
+    int clean_workspaces = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--clean") == 0) {
+            clean_workspaces = 1;
+        } else if (repo_arg == NULL) {
+            repo_arg = argv[i];
+        }
+    }
+
+    if (!repo_arg) {
+        printf("Error: Missing fossil repository path.\n");
         return 1;
     }
 
     char abs_repo_path[4096];
-    if (realpath(argv[1], abs_repo_path) == NULL) {
-        printf("Error: Could not resolve path to %s\n", argv[1]);
+    if (realpath(repo_arg, abs_repo_path) == NULL) {
+        printf("Error: Could not resolve path to %s\n", repo_arg);
         return 1;
+    }
+
+    if (clean_workspaces) {
+        printf("Cleaning workspaces in /tmp/workspaces/...\n");
+        system("rm -rf /tmp/workspaces");
     }
 
     const char *repo_path = abs_repo_path;
     fossil_set_repo_path(repo_path);
 
     Agent agents[MAX_AGENTS];
+    g_agents = agents;
     int agent_count = 0;
 
     init_ui();
+    signal(SIGINT, handle_sigint);
+
     char init_msg[512];
     snprintf(init_msg, sizeof(init_msg), "System initializing... Target Repo: %s", repo_path);
     log_message(init_msg);
     
     orchestrator_init(agents, &agent_count);
+    g_agent_count = agent_count;
     
     log_message("Orchestrator online. Waiting for heartbeat...");
 
     int selected_agent = 0;
-    int running = 1;
-
     // Set non-blocking input for the heartbeat loop matching TICK_INTERVAL_MS
     timeout(TICK_INTERVAL_MS);
 
-    while (running) {
+    while (g_running) {
         draw_main_screen(agents, agent_count, selected_agent);
 
         int ch = getch();
         switch (ch) {
             case 'q':
             case 'Q':
-                running = 0;
+                g_running = 0;
                 break;
             case KEY_UP:
                 if (selected_agent > 0) selected_agent--;
@@ -60,14 +94,11 @@ int main(int argc, char *argv[]) {
             case 'A':
                 if (agent_count > 0) {
                     char cmd[512];
-                    // Select the window first, then attach to the session
                     snprintf(cmd, sizeof(cmd), "tmux select-window -t mei:\"%s\"; tmux attach -t mei", agents[selected_agent].name);
                     
                     def_prog_mode();
                     endwin();
-                    
                     system(cmd);
-                    
                     reset_prog_mode();
                     refresh();
                     
@@ -104,7 +135,6 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             case ERR:
-                // Timeout reached, perform Heartbeat TICK
                 orchestrator_tick(agents, agent_count);
                 break;
         }
@@ -116,3 +146,4 @@ int main(int argc, char *argv[]) {
     destroy_ui();
     return 0;
 }
+

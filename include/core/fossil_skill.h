@@ -10,12 +10,21 @@ void fossil_set_repo_path(const char *path);
 // Get the current global fossil repository path
 const char *fossil_get_repo_path();
 
+typedef struct {
+    char tkt_uuid[64];
+    char title[128];
+    char status[64];
+    char assignee[64]; // Mapped to private_contact in Fossil
+} FossilTicket;
+
 // Initialize the fossil repository if not exists (Mock or Real)
 bool fossil_init(const char *repo_path);
 
-// Fetch the list of tickets. In a real scenario, this parses fossil ticket show.
-// Writes the raw string into buffer.
+// Fetch raw ticket list string
 int fossil_ticket_list(char *buffer, size_t max_size);
+
+// Fetch parsed tickets. Returns number of tickets read.
+int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets);
 
 // Create a new ticket
 bool fossil_ticket_create(const char *title, const char *description);

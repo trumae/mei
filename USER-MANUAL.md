@@ -77,3 +77,10 @@ Se um agente entra em loop contínuo e não resolve a demanda após um número l
 1. O estado do Agente muda para `BLOCKED`.
 2. Uma instrução CLI é disparada para o Fossil, atualizando a *tag/status* do ticket correspondente para travado.
 3. Caberá a um agente **Revisor** ou a você (humano) acessar a thread e intervir com novas instruções manuais ou reassinar o ticket.
+
+## Nota
+
+Se você criar um ticket usando a linha de comando do fossil: fossil ticket add title "Criar nova interface" comment "Mudar as cores para azul".
+
+Não utilize o campo sub-sistema do fossil para colocar o nome do agente. Este campo não está sendo utilizado pelo MEI. 
+O MEI busca o agente para quem ele está designado através do campo "private-contact".

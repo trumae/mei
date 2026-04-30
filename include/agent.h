@@ -14,6 +14,8 @@ typedef enum {
 typedef struct {
     char name[64];
     char role[64];
+    char cli[64];
+    char cmd[512];
     AgentState state;
     int last_heartbeat; // simulated seconds ago
     char current_ticket[64];

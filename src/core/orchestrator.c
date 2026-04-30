@@ -46,14 +46,45 @@ void orchestrator_init(Agent *agents, int *agent_count) {
 }
 
 void orchestrator_tick(Agent *agents, int agent_count) {
-    // In a full implementation, we'd sync with fossil here:
-    // char fossil_data[4096];
-    // if (fossil_ticket_list(fossil_data, sizeof(fossil_data)) > 0) { ... update agent ticket assignment based on fossil ... }
+    FossilTicket tickets[100];
+    int tkt_count = fossil_ticket_list_parsed(tickets, 100);
 
     for (int i = 0; i < agent_count; i++) {
         Agent *a = &agents[i];
         
-        if (a->state == AGENT_STATE_IN_PROGRESS) {
+        if (a->state == AGENT_STATE_OPEN) {
+            // Find an unassigned open ticket for this agent
+            for (int t = 0; t < tkt_count; t++) {
+                if (strlen(tickets[t].assignee) == 0 && 
+                    (strcasecmp(tickets[t].status, "Open") == 0 || strlen(tickets[t].status) == 0)) {
+                    
+                    // Assign to this agent
+                    fossil_ticket_assign(tickets[t].tkt_uuid, a->name);
+                    fossil_ticket_set_status(tickets[t].tkt_uuid, "In Progress");
+                    
+                    strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);
+                    a->state = AGENT_STATE_IN_PROGRESS;
+                    ticket_steps[i] = 0;
+                    
+                    char log[256];
+                    snprintf(log, sizeof(log), "Assigned %s to %s", tickets[t].tkt_uuid, a->name);
+                    log_message(log);
+
+                    // Send initial PULSE
+                    PulseMessage pmsg;
+                    strcpy(pmsg.intent, "Start Ticket");
+                    snprintf(pmsg.context, sizeof(pmsg.context), "Ticket %s: %s", a->current_ticket, tickets[t].title);
+                    strcpy(pmsg.current_state, "New");
+                    strcpy(pmsg.next_action, "Read repository and plan execution");
+
+                    char payload[1024];
+                    pulse_format(&pmsg, payload, sizeof(payload));
+                    tmux_send_pulse(a->name, payload);
+                    
+                    break;
+                }
+            }
+        } else if (a->state == AGENT_STATE_IN_PROGRESS) {
             a->last_heartbeat = 0; // Reset heartbeat to indicate activity tracking
 
             // Check if agent hit the MAX_STEPS_PER_TICKET
@@ -64,7 +95,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 log_message(log);
                 
                 // Inform via fossil
-                fossil_ticket_set_status(a->current_ticket, "blocked");
+                fossil_ticket_set_status(a->current_ticket, "Blocked");
                 continue;
             }
 
@@ -76,24 +107,24 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 // For demonstration, we just increment step count randomly (mocking progress)
                 ticket_steps[i]++;
                 
-                PulseMessage pmsg;
-                strcpy(pmsg.intent, "Execute Next Step");
-                snprintf(pmsg.context, sizeof(pmsg.context), "Ticket %s", a->current_ticket);
-                snprintf(pmsg.current_state, sizeof(pmsg.current_state), "Step %d/%d", ticket_steps[i], MAX_STEPS_PER_TICKET);
-                strcpy(pmsg.next_action, "Analyze workspace and act");
-
-                char payload[1024];
-                pulse_format(&pmsg, payload, sizeof(payload));
-                
-                // Send pulse every few ticks for visual pacing (mocking)
+                // Only send mock pulses every few ticks to avoid flooding
                 if (ticket_steps[i] % 5 == 0) {
+                    PulseMessage pmsg;
+                    strcpy(pmsg.intent, "Execute Next Step");
+                    snprintf(pmsg.context, sizeof(pmsg.context), "Ticket %s", a->current_ticket);
+                    snprintf(pmsg.current_state, sizeof(pmsg.current_state), "Step %d/%d", ticket_steps[i], MAX_STEPS_PER_TICKET);
+                    strcpy(pmsg.next_action, "Analyze workspace and act");
+
+                    char payload[1024];
+                    pulse_format(&pmsg, payload, sizeof(payload));
                     tmux_send_pulse(a->name, payload);
+                    
                     char log[256];
                     snprintf(log, sizeof(log), "Sent PULSE to %s for step %d", a->name, ticket_steps[i]);
                     log_message(log);
                 }
             }
-        } else if (a->state == AGENT_STATE_OFFLINE || a->state == AGENT_STATE_PAUSED) {
+        } else if (a->state == AGENT_STATE_OFFLINE || a->state == AGENT_STATE_PAUSED || a->state == AGENT_STATE_BLOCKED) {
             a->last_heartbeat++;
         }
     }
