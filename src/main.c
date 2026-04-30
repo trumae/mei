@@ -102,15 +102,24 @@ int main(int argc, char *argv[]) {
                 if (agent_count > 0) {
                     char cmd[512];
                     snprintf(cmd, sizeof(cmd), "tmux select-window -t mei:\"%s\"; tmux attach -t mei", agents[selected_agent].name);
-                    
+
+                    // Warn: the orchestrator tick loop is blocked for the entire duration
+                    // of the attach.  No PULSE delivery or ticket routing will happen until
+                    // the user detaches (Ctrl+B, D).
+                    char attach_log[256];
+                    snprintf(attach_log, sizeof(attach_log),
+                             "[!] Ticks PAUSED — attached to %s. Detach with Ctrl+B, D to resume.",
+                             agents[selected_agent].name);
+                    log_message(attach_log);
+
                     def_prog_mode();
                     endwin();
                     system(cmd);
                     reset_prog_mode();
                     refresh();
-                    
+
                     char log[256];
-                    snprintf(log, sizeof(log), "Detached from %s", agents[selected_agent].name);
+                    snprintf(log, sizeof(log), "[ok] Detached from %s — ticks resuming.", agents[selected_agent].name);
                     log_message(log);
                 }
                 break;

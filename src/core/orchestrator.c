@@ -149,7 +149,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     int is_subtask = strstr(tickets[t].comment, "[parent:") != NULL;
                     role_accepts = tkt_open && !is_subtask;
                 } else if (strcmp(a->role, "coder") == 0) {
-                    role_accepts = is_delegated && (tkt_planned || tkt_rework);
+                    int is_subtask = (strstr(tickets[t].comment, "[parent:") != NULL);
+                    // Also accept re-opened sub-tickets (user manually reset to Open)
+                    role_accepts = is_delegated && (tkt_planned || tkt_rework || (tkt_open && is_subtask));
                 } else if (strcmp(a->role, "reviewer") == 0) {
                     role_accepts = is_delegated && tkt_review;
                 } else {
