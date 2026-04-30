@@ -293,7 +293,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     }
 
                     // Truncate ticket description to leave room for instructions.
-                    char desc_short[4096];
+                    char desc_short[MEI_TEXT_BUFFER_SIZE];
                     strncpy(desc_short, tkt_info.comment, sizeof(desc_short) - 1);
                     desc_short[sizeof(desc_short) - 1] = '\0';
 

@@ -1,7 +1,7 @@
 #ifndef AGENT_H
 #define AGENT_H
 
-#include "config.h"
+#include "core/config.h"
 
 typedef enum {
     AGENT_STATE_OPEN,
