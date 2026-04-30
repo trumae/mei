@@ -148,10 +148,18 @@ bool fossil_commit(const char *workspace, const char *message) {
 
 bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
     if (!global_repo_path[0] || !ticket_id || !note) return false;
+
+    // Ensure the changelog column exists; ALTER TABLE is a no-op if already present
+    // (SQLite will error, which we discard). This handles fresh repositories.
+    char ensure_col[512];
+    snprintf(ensure_col, sizeof(ensure_col),
+             "printf 'ALTER TABLE ticket ADD COLUMN changelog TEXT;\\n' "
+             "| fossil sqlite -R %s 2>/dev/null",
+             global_repo_path);
+    system(ensure_col);
+
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
-    // Format: [MEI YYYY-MM-DD HH:MM] <note> — stored in 'changelog' field.
-    // Notes are orchestrator-generated (no shell-special chars), so direct quoting is safe.
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "fossil ticket set %s changelog \"[MEI %04d-%02d-%02d %02d:%02d] %s\" -R %s",

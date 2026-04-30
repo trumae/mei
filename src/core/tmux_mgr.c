@@ -73,11 +73,14 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     // they buffer pasted content and do NOT auto-submit on embedded newlines.
     // Only the explicit Enter at the end commits the message.
     char cmd[1024];
+    // -p enables bracketed-paste mode: the terminal application receives
+    // ESC[200~...content...ESC[201~ which prevents TUI input widgets from
+    // auto-submitting on embedded newlines within the multi-line PULSE.
     snprintf(cmd, sizeof(cmd),
-             "tmux load-buffer '%s' && "
-             "tmux paste-buffer -t '%s:\"%s\"' && "
+             "tmux load-buffer %s && "
+             "tmux paste-buffer -p -t %s:%s && "
              "sleep 0.5 && "
-             "tmux send-keys -t '%s:\"%s\"' Enter",
+             "tmux send-keys -t %s:%s Enter",
              tmp_payload,
              TMUX_SESSION, agent_name,
              TMUX_SESSION, agent_name);
@@ -92,7 +95,7 @@ bool tmux_send_enter(const char *agent_name) {
         return false;
     }
     char cmd[256];
-    snprintf(cmd, sizeof(cmd), "tmux send-keys -t '%s:\"%s\"' Enter", TMUX_SESSION, agent_name);
+    snprintf(cmd, sizeof(cmd), "tmux send-keys -t %s:%s Enter", TMUX_SESSION, agent_name);
     return system(cmd) == 0;
 }
 

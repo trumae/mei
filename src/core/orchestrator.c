@@ -364,8 +364,6 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                "Decompose into sub-tickets, create each with fossil ticket add, then delegate parent to coder");
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
-                        // Point 4: explicit code-creation and commit requirement.
-                        // Point 3: show dependency and sub-ticket context.
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
@@ -375,13 +373,17 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "1. Create a dedicated branch:\n"
                                  "     fossil branch new %s trunk\n"
                                  "     fossil update %s\n"
-                                 "2. READ the ticket and all sub-tickets listed above.\n"
-                                 "3. WRITE CODE: create or modify source files to implement the task.\n"
-                                 "   YOU MUST PRODUCE REAL FILE CHANGES. Planning or describing the\n"
-                                 "   solution is NOT sufficient — actual code must be written.\n"
-                                 "4. COMMIT your changes (required before submitting for review):\n"
+                                 "2. READ the ticket description carefully. Implement EXACTLY what is asked.\n"
+                                 "   Do NOT use your own name, agent name, or placeholder values anywhere\n"
+                                 "   in the code (e.g. module names, package names, comments).\n"
+                                 "   Use names derived from the ticket title and project context.\n"
+                                 "3. WRITE COMPLETE CODE — not stubs, not Hello World unless the ticket\n"
+                                 "   explicitly asks for a Hello World. Every function must be implemented.\n"
+                                 "   The code must compile and run without errors.\n"
+                                 "4. VERIFY before submitting: build and run the code to confirm it works.\n"
+                                 "5. COMMIT your changes:\n"
                                  "     fossil commit -m \"Implement %s: %s\"\n"
-                                 "5. Submit for review only AFTER committing:\n"
+                                 "6. Submit for review only AFTER committing and verifying:\n"
                                  "     fossil ticket set %s status \"Review\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
@@ -393,26 +395,37 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->current_ticket, a->current_ticket, reviewer_hash, reviewer_hash);
                         strcpy(pmsg.current_state, "Coding");
                         strcpy(pmsg.next_action,
-                               "Create branch, write code files, commit, then set ticket to Review");
+                               "Create branch, implement fully, build+verify, commit, then set ticket to Review");
                     } else if (strcmp(a->role, "reviewer") == 0) {
-                        strcpy(pmsg.intent, "Review and Merge Branch");
+                        strcpy(pmsg.intent, "Review, Verify, and Merge or Reject");
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
                                  "=== SUB-TICKETS ===\n%s\n"
-                                 "=== YOUR TASK (REVIEWER) ===\n"
+                                 "=== YOUR TASK (REVIEWER) — BE STRICT ===\n"
                                  "1. Check out the implementation branch:\n"
                                  "     fossil update %s\n"
-                                 "2. Review ALL sub-tickets listed above and their committed code.\n"
-                                 "3. If acceptable, merge into trunk and close:\n"
+                                 "2. Read EVERY file that was changed. Use `fossil diff --from trunk` to\n"
+                                 "   see exactly what was added or modified.\n"
+                                 "3. Verify EACH requirement in the ticket description is fully satisfied:\n"
+                                 "   - If the ticket asks for specific files, check they exist and are non-trivial.\n"
+                                 "   - If the ticket asks for working code, BUILD and RUN it (e.g. `go build ./...`,\n"
+                                 "     `go vet ./...`, run tests if present).\n"
+                                 "   - Reject placeholder/stub code (e.g. empty functions, Hello World where real\n"
+                                 "     logic was expected, hardcoded values, TODO comments left in).\n"
+                                 "   - Reject if module/package names are nonsensical (agent names, temp names).\n"
+                                 "4. Only if ALL requirements are genuinely met, merge into trunk:\n"
                                  "     fossil update trunk\n"
                                  "     fossil merge %s\n"
                                  "     fossil commit -m \"Merge %s: %s\"\n"
                                  "     fossil ticket set %s status \"Done\"\n"
-                                 "4. If rework is needed, explain why and return to coder:\n"
+                                 "5. If ANYTHING is incomplete or wrong, return for rework with a clear\n"
+                                 "   explanation of exactly what needs to be fixed:\n"
                                  "     fossil ticket set %s status \"Rework\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
-                                 "Coder hash (for rework): %s",
+                                 "   Then explain the rejection reason in plain text.\n"
+                                 "Coder hash (for rework): %s\n"
+                                 "REMEMBER: approving bad code harms the project. When in doubt, reject.",
                                  a->current_ticket, tkt_info.title, desc_short,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  branch_name,
@@ -421,7 +434,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
                         strcpy(pmsg.current_state, "Reviewing");
                         strcpy(pmsg.next_action,
-                               "Check branch, verify code and sub-tickets, then merge+Done or Rework");
+                               "Read all changes, build/run code, verify every requirement — merge only if fully satisfied, otherwise Rework");
                     } else {
                         strcpy(pmsg.intent, "Start Ticket");
                         snprintf(pmsg.context, sizeof(pmsg.context),
@@ -464,14 +477,20 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 continue;
             }
 
-            // For real agents, we should only send PULSEs when they are ready.
-            // For now, let's just stop the automatic step incrementing to avoid hitting MAX_STEPS.
-            // ticket_steps[i]++ was causing it to hit MAX_STEPS too fast.
-            
-            char pane_out[2048];
+            // Monitor the pane for tool-use permission dialogs (opencode shows
+            // "Permission required" / "Allow once" when it wants to access files
+            // or run commands outside the workspace).  Auto-accept with Enter so
+            // the pipeline isn't blocked waiting for a human.
+            char pane_out[4096];
             if (tmux_capture_output(a->name, pane_out, sizeof(pane_out)) > 0) {
-                // Here we could parse pane_out for specific agent responses
-                // but for now we just avoid the infinite loop.
+                if (strstr(pane_out, "Permission required") != NULL ||
+                    strstr(pane_out, "Allow once") != NULL) {
+                    tmux_send_enter(a->name);
+                    char perm_log[128];
+                    snprintf(perm_log, sizeof(perm_log),
+                             "[perm] Auto-accepted permission dialog for %s", a->name);
+                    log_message(perm_log);
+                }
             }
         } else if (a->state == AGENT_STATE_OFFLINE || a->state == AGENT_STATE_PAUSED || a->state == AGENT_STATE_BLOCKED) {
             a->last_heartbeat++;
