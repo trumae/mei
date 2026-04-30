@@ -54,11 +54,20 @@ void orchestrator_tick(Agent *agents, int agent_count) {
         if (a->state == AGENT_STATE_OPEN) {
             // Find an unassigned open ticket for this agent
             for (int t = 0; t < tkt_count; t++) {
-                if (strlen(tickets[t].assignee) == 0 && 
+                int is_unassigned = (strlen(tickets[t].assignee) == 0);
+                int is_delegated = (strcmp(tickets[t].assignee, a->hash) == 0);
+                
+                char dbg[256];
+                snprintf(dbg, sizeof(dbg), "Agent %s (%s) saw tkt %s (assignee: %s).", a->name, a->hash, tickets[t].tkt_uuid, tickets[t].assignee);
+                log_message(dbg);
+
+                if ((is_unassigned || is_delegated) && 
                     (strcasecmp(tickets[t].status, "Open") == 0 || strlen(tickets[t].status) == 0)) {
                     
-                    // Assign to this agent
-                    fossil_ticket_assign(tickets[t].tkt_uuid, a->name);
+                    // Assign to this agent if unassigned
+                    if (is_unassigned) {
+                        fossil_ticket_assign(tickets[t].tkt_uuid, a->name);
+                    }
                     fossil_ticket_set_status(tickets[t].tkt_uuid, "In Progress");
                     
                     strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);

@@ -10,7 +10,11 @@ static void ensure_session_exists() {
     snprintf(cmd, sizeof(cmd), "tmux has-session -t %s 2>/dev/null", TMUX_SESSION);
     if (system(cmd) != 0) {
         snprintf(cmd, sizeof(cmd), "tmux new-session -d -s %s", TMUX_SESSION);
-        system(cmd);
+        if (system(cmd) != 0) {
+            char err[4096];
+            snprintf(err, sizeof(err), "echo 'Failed: %s' >> /tmp/tmux_err.log", cmd);
+            system(err);
+        }
     }
 }
 
@@ -32,12 +36,12 @@ bool tmux_spawn_agent(const char *agent_name, const char *cli_command, const cha
     char cmd[2048];
     // Create a new window in the existing session
     if (cli_command && strlen(cli_command) > 0) {
-        snprintf(cmd, sizeof(cmd), "tmux new-window -d -t %s -n \"%s\" -c \"%s\" \"%s\"", TMUX_SESSION, agent_name, workspace, cli_command);
+        snprintf(cmd, sizeof(cmd), "tmux new-window -d -t %s -n \"%s\" -c \"%s\" %s", TMUX_SESSION, agent_name, workspace, cli_command);
     } else {
         snprintf(cmd, sizeof(cmd), "tmux new-window -d -t %s -n \"%s\" -c \"%s\"", TMUX_SESSION, agent_name, workspace);
     }
     
-    return (system(cmd) == 0);
+    int res = system(cmd); if(res!=0) { char err[4096]; snprintf(err, sizeof(err), "echo 'Failed: %s' >> /tmp/tmux_err.log", cmd); system(err); } return res == 0;
 }
 
 bool tmux_kill_agent(const char *agent_name) {
@@ -47,7 +51,7 @@ bool tmux_kill_agent(const char *agent_name) {
     
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "tmux kill-window -t %s:\"%s\"", TMUX_SESSION, agent_name);
-    return (system(cmd) == 0);
+    int res = system(cmd); if(res!=0) { char err[4096]; snprintf(err, sizeof(err), "echo 'Failed: %s' >> /tmp/tmux_err.log", cmd); system(err); } return res == 0;
 }
 
 bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {

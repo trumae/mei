@@ -33,7 +33,7 @@ int agent_mgr_load_all(Agent *agents) {
                     
                     FILE *cat_fp = popen(cat_cmd, "r");
                     if (cat_fp) {
-                        char line[256];
+                        char line[2048];
                         Agent *a = &agents[count];
                         memset(a, 0, sizeof(Agent));
                         
@@ -43,7 +43,7 @@ int agent_mgr_load_all(Agent *agents) {
 
                         while (fgets(line, sizeof(line), cat_fp)) {
                             char key[64];
-                            char value[192];
+                            char value[1024];
                             if (sscanf(line, "%63[^:]: %[^\n]", key, value) == 2) {
                                 if (strcmp(key, "name") == 0) {
                                     strncpy(a->name, value, sizeof(a->name)-1);
@@ -57,6 +57,17 @@ int agent_mgr_load_all(Agent *agents) {
                             }
                         }
                         pclose(cat_fp);
+                        
+                        // Compute SHA1 hash of the agent name for private_contact matching
+                        char hash_cmd[256];
+                        snprintf(hash_cmd, sizeof(hash_cmd), "echo -n \"%s\" | shasum | awk '{print $1}'", a->name);
+                        FILE *hash_fp = popen(hash_cmd, "r");
+                        if (hash_fp) {
+                            if (fgets(a->hash, sizeof(a->hash), hash_fp)) {
+                                a->hash[strcspn(a->hash, "\n")] = 0;
+                            }
+                            pclose(hash_fp);
+                        }
                         
                         if (strlen(a->name) > 0) {
                             count++;

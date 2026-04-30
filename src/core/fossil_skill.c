@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ui.h"
 
 static char global_repo_path[1024] = {0};
 
@@ -15,9 +16,10 @@ const char *fossil_get_repo_path() {
     return global_repo_path;
 }
 
-// Helper to run commands and check success
 static bool run_cmd(const char *cmd) {
-    int res = system(cmd);
+    char full_cmd[1024];
+    snprintf(full_cmd, sizeof(full_cmd), "%s >> /tmp/fossil_err.log 2>&1", cmd);
+    int res = system(full_cmd);
     return (res == 0);
 }
 
@@ -59,7 +61,7 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     if (!global_repo_path[0]) return 0;
     
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "echo \".mode list\nSELECT tkt_uuid || '|' || coalesce(title, '') || '|' || coalesce(status, '') || '|' || coalesce(private_contact, '') FROM ticket WHERE status != 'Closed' AND status != 'done';\" | fossil sqlite -R %s 2>/dev/null", global_repo_path);
+    snprintf(cmd, sizeof(cmd), "printf \".mode list\\nSELECT tkt_uuid || '|' || coalesce(title, '') || '|' || coalesce(status, '') || '|' || coalesce(private_contact, '') FROM ticket WHERE status != 'Closed' AND status != 'done';\\n\" | fossil sqlite -R %s 2>/dev/null", global_repo_path);
     
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
@@ -114,7 +116,11 @@ bool fossil_ticket_set_status(const char *ticket_id, const char *status) {
     } else {
         snprintf(cmd, sizeof(cmd), "fossil ticket set %s status \"%s\"", ticket_id, status);
     }
-    return run_cmd(cmd);
+    bool res = run_cmd(cmd);
+    char log[1024];
+    snprintf(log, sizeof(log), "fossil_ticket_set_status: cmd='%s', result=%d", cmd, res);
+    log_message(log);
+    return res;
 }
 
 bool fossil_commit(const char *workspace, const char *message) {
