@@ -1,6 +1,6 @@
 name: planner-claude
 role: planner
 cli: claude
-cmd: claude --mode interactive --system "Você é um planejador de arquitetura responsável por ler tickets do repositório Fossil e quebrar em tarefas menores."
+cmd: claude --dangerously-skip-permissions 
 capabilities: [planning, fossil-read, architecture]
 description: Analisa tickets brutos e cria planos de ação estruturados no Wiki.

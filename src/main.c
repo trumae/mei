@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <ncurses.h>
 #include "ui.h"
 #include "agent.h"
@@ -75,6 +76,11 @@ int main(int argc, char *argv[]) {
     // Set non-blocking input for the heartbeat loop matching TICK_INTERVAL_MS
     timeout(TICK_INTERVAL_MS);
 
+    // Wall-clock guard: even if getch() returns ERR immediately (no proper
+    // terminal / stdin redirected), the tick runs at most once per TICK_INTERVAL_MS.
+    struct timespec last_tick = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &last_tick);
+
     while (g_running) {
         draw_main_screen(agents, agent_count, selected_agent);
 
@@ -134,9 +140,17 @@ int main(int argc, char *argv[]) {
                     log_message(log);
                 }
                 break;
-            case ERR:
-                orchestrator_tick(agents, agent_count);
+            case ERR: {
+                struct timespec now;
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                long elapsed_ms = (now.tv_sec  - last_tick.tv_sec)  * 1000
+                                + (now.tv_nsec - last_tick.tv_nsec) / 1000000;
+                if (elapsed_ms >= TICK_INTERVAL_MS) {
+                    last_tick = now;
+                    orchestrator_tick(agents, agent_count);
+                }
                 break;
+            }
         }
     }
 

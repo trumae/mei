@@ -45,8 +45,10 @@ void destroy_ui() {
     endwin();
 }
 
+#define MEI_LOG_MAX_BYTES 524288  /* 512 KB – rotate when exceeded */
+
 void log_message(const char *msg) {
-    // Add to ncurses buffer
+    // Add to ncurses ring buffer
     if (log_count < MAX_LOG_MESSAGES) {
         strncpy(log_messages[log_count], msg, 255);
         log_count++;
@@ -57,14 +59,24 @@ void log_message(const char *msg) {
         strncpy(log_messages[MAX_LOG_MESSAGES - 1], msg, 255);
     }
 
-    // Append to file for debugging
-    FILE *f = fopen("/tmp/mei.log", "a");
-    if (f) {
-        time_t now = time(NULL);
-        struct tm *t = localtime(&now);
-        fprintf(f, "[%02d:%02d:%02d] %s\n", t->tm_hour, t->tm_min, t->tm_sec, msg);
+    // Append to log file; rotate (truncate) when it exceeds MEI_LOG_MAX_BYTES.
+    const char *log_path = "/tmp/mei.log";
+    FILE *f = fopen(log_path, "a");
+    if (!f) return;
+
+    // Check size before writing; if too large, reopen in truncate mode.
+    fseek(f, 0, SEEK_END);
+    if (ftell(f) > MEI_LOG_MAX_BYTES) {
         fclose(f);
+        f = fopen(log_path, "w");
+        if (!f) return;
+        fprintf(f, "[rotated]\n");
     }
+
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    fprintf(f, "[%02d:%02d:%02d] %s\n", t->tm_hour, t->tm_min, t->tm_sec, msg);
+    fclose(f);
 }
 
 static void draw_borders(WINDOW *win, const char *title) {
