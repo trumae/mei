@@ -49,6 +49,10 @@ int agent_mgr_load_all(Agent *agents) {
                                     strncpy(a->name, value, sizeof(a->name)-1);
                                 } else if (strcmp(key, "role") == 0) {
                                     strncpy(a->role, value, sizeof(a->role)-1);
+                                } else if (strcmp(key, "cli") == 0) {
+                                    strncpy(a->cli, value, sizeof(a->cli)-1);
+                                } else if (strcmp(key, "cmd") == 0) {
+                                    strncpy(a->cmd, value, sizeof(a->cmd)-1);
                                 }
                             }
                         }

@@ -36,8 +36,7 @@ void orchestrator_init(Agent *agents, int *agent_count) {
         }
 
         if (!tmux_session_exists(agents[i].name)) {
-            // For the prototype, we just spawn a shell. In reality, it would be the CLI tool (e.g. opencode, aider)
-            tmux_spawn_agent(agents[i].name, "", workspace);
+            tmux_spawn_agent(agents[i].name, agents[i].cmd, workspace);
             char log[256];
             snprintf(log, sizeof(log), "Spawned tmux for %s in %s", agents[i].name, workspace);
             log_message(log);
