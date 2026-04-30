@@ -5,13 +5,15 @@
 int pulse_format(const PulseMessage *msg, char *buffer, size_t max_size) {
     if (!msg || !buffer || max_size == 0) return -1;
 
+    // Plain markdown — no [PULSE] envelope.
+    // Envelope tags were interpreted as empty metadata by LLM backends (GPT-4.1,
+    // Claude), causing "message is empty" responses.  Plain markdown headings
+    // are unambiguous instructions to any model.
     int written = snprintf(buffer, max_size,
-        "[PULSE]\n"
-        "Intent: %s\n"
-        "Context: %s\n"
-        "CurrentState: %s\n"
-        "NextAction: %s\n"
-        "[/PULSE]\n",
+        "# %s\n\n"
+        "%s\n\n"
+        "**Current State:** %s\n"
+        "**Your next action:** %s\n",
         msg->intent,
         msg->context,
         msg->current_state,
@@ -19,7 +21,7 @@ int pulse_format(const PulseMessage *msg, char *buffer, size_t max_size) {
     );
 
     if (written < 0 || (size_t)written >= max_size) {
-        return -1; // Buffer too small or format error
+        return -1;
     }
 
     return written;

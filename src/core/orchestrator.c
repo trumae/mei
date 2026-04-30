@@ -143,9 +143,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
                 int role_accepts = 0;
                 if (strcmp(a->role, "planner") == 0) {
-                    // Planner owns ALL Open tickets; status=Open means "not yet planned".
-                    // Assignment from a prior run is irrelevant — Open is always replanned.
-                    role_accepts = tkt_open;
+                    // Planner owns Open tickets that are not sub-tasks.
+                    // Sub-tickets (comment contains [parent:...]) were already created by a
+                    // previous planning cycle and belong to a specific agent — don't re-plan them.
+                    int is_subtask = strstr(tickets[t].comment, "[parent:") != NULL;
+                    role_accepts = tkt_open && !is_subtask;
                 } else if (strcmp(a->role, "coder") == 0) {
                     role_accepts = is_delegated && (tkt_planned || tkt_rework);
                 } else if (strcmp(a->role, "reviewer") == 0) {
@@ -190,6 +192,35 @@ void orchestrator_tick(Agent *agents, int agent_count) {
             }
         } else if (a->state == AGENT_STATE_IN_PROGRESS) {
             a->last_heartbeat = 0;
+
+            // Detect ticket completion: monitor whether the current ticket is still
+            // "In Progress" with this agent's hash.  When the agent delivers its work
+            // (changes status to Planned/Review/Done/etc.), it releases the ticket and
+            // the orchestrator must return this agent to OPEN so the pipeline continues.
+            // Skip during warm-up (ticket_steps == -1) to avoid a false positive right
+            // after assignment, before the AI has had a chance to do anything.
+            if (ticket_steps[i] != -1) {
+                int still_active = 0;
+                for (int t = 0; t < tkt_count; t++) {
+                    if (strcmp(tickets[t].tkt_uuid, a->current_ticket) == 0) {
+                        still_active = (strcasecmp(tickets[t].status, "In Progress") == 0) &&
+                                       (strcmp(tickets[t].assignee, a->hash) == 0);
+                        break;
+                    }
+                }
+                if (!still_active) {
+                    char done_log[256];
+                    snprintf(done_log, sizeof(done_log),
+                             "[done] %s finished ticket %s → back to OPEN",
+                             a->name, a->current_ticket);
+                    log_message(done_log);
+                    a->state = AGENT_STATE_OPEN;
+                    strcpy(a->current_ticket, "None");
+                    ticket_steps[i] = 0;
+                    warm_up_ticks[i] = 0;
+                    continue;
+                }
+            }
 
             // --- Warm-up phase: wait for CLI to be ready before sending PULSE ---
             if (ticket_steps[i] == -1) {

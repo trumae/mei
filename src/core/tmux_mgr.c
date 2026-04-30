@@ -66,35 +66,24 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     fprintf(f, "%s", pulse_payload);
     fclose(f);
 
-    char tmp_script[256];
-    snprintf(tmp_script, sizeof(tmp_script), "/tmp/pulse_%s.sh", agent_name);
-    FILE *sf = fopen(tmp_script, "w");
-    if (!sf) { remove(tmp_payload); return false; }
-    
-    // Collapse the multi-line PULSE into a single line with literal \n separators
-    // before sending, so the entire message is submitted with ONE Enter press.
-    // Without this, every newline in the buffer would be treated as Enter by the
-    // target CLI (claude, opencode), causing N separate submissions instead of one.
-    fprintf(sf,
-            "#!/bin/bash\n"
-            "sed ':a;N;$!ba;s/\\n/\\\\n/g' '%s' > '%s.single'\n"
-            "tmux load-buffer '%s.single'\n"
-            "tmux paste-buffer -t '%s:%s'\n"
-            "sleep 0.3\n"
-            "tmux send-keys -t '%s:%s' Enter\n"
-            "rm -f '%s.single'\n",
-            tmp_payload, tmp_payload,
-            tmp_payload,
-            TMUX_SESSION, agent_name,
-            TMUX_SESSION, agent_name,
-            tmp_payload);
-    fclose(sf);
+    // Load the PULSE file directly into the tmux buffer and paste it as-is.
+    // The sed newline-collapse that was here previously was unreliable on macOS
+    // BSD sed for large payloads (silently produced empty output), and was also
+    // unnecessary: opencode and claude both run as raw-mode TUI applications —
+    // they buffer pasted content and do NOT auto-submit on embedded newlines.
+    // Only the explicit Enter at the end commits the message.
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "tmux load-buffer '%s' && "
+             "tmux paste-buffer -t '%s:\"%s\"' && "
+             "sleep 0.5 && "
+             "tmux send-keys -t '%s:\"%s\"' Enter",
+             tmp_payload,
+             TMUX_SESSION, agent_name,
+             TMUX_SESSION, agent_name);
 
-    system("chmod +x /tmp/pulse_*.sh");
-    int res = system(tmp_script);
-    
+    int res = system(cmd);
     remove(tmp_payload);
-    remove(tmp_script);
     return (res == 0);
 }
 
