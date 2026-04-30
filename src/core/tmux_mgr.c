@@ -71,21 +71,23 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     FILE *sf = fopen(tmp_script, "w");
     if (!sf) { remove(tmp_payload); return false; }
     
-    // Use tmux load-buffer + paste-buffer so that the entire PULSE lands as a
-    // single chunk of text, not as N separate Enter-submitted messages.
-    // paste-buffer triggers bracketed paste mode on the target pane (if the CLI
-    // supports it, e.g. claude, opencode), so embedded newlines are treated as
-    // literal newlines in the input field — not as submit actions.
-    // A single Enter after the paste submits the complete PULSE as one message.
+    // Collapse the multi-line PULSE into a single line with literal \n separators
+    // before sending, so the entire message is submitted with ONE Enter press.
+    // Without this, every newline in the buffer would be treated as Enter by the
+    // target CLI (claude, opencode), causing N separate submissions instead of one.
     fprintf(sf,
             "#!/bin/bash\n"
-            "tmux load-buffer '%s'\n"
+            "sed ':a;N;$!ba;s/\\n/\\\\n/g' '%s' > '%s.single'\n"
+            "tmux load-buffer '%s.single'\n"
             "tmux paste-buffer -t '%s:%s'\n"
             "sleep 0.3\n"
-            "tmux send-keys -t '%s:%s' Enter\n",
+            "tmux send-keys -t '%s:%s' Enter\n"
+            "rm -f '%s.single'\n",
+            tmp_payload, tmp_payload,
             tmp_payload,
             TMUX_SESSION, agent_name,
-            TMUX_SESSION, agent_name);
+            TMUX_SESSION, agent_name,
+            tmp_payload);
     fclose(sf);
 
     system("chmod +x /tmp/pulse_*.sh");
