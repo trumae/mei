@@ -158,12 +158,23 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
                 if (!role_accepts && !is_recovery) continue;
 
-                // Always normalize to this agent's hash if not already set correctly.
+                // Normalize assignee to this agent's hash and mark as In Progress.
                 if (strcmp(tickets[t].assignee, a->hash) != 0) {
                     fossil_ticket_assign(tickets[t].tkt_uuid, a->hash);
+                    // Point 1: document WHY the assignment changed.
+                    char note[256];
+                    snprintf(note, sizeof(note), "Assigned to %s (%s) by orchestrator routing.",
+                             a->name, a->role);
+                    fossil_ticket_add_note(tickets[t].tkt_uuid, note);
                 }
                 if (!tkt_progress) {
                     fossil_ticket_set_status(tickets[t].tkt_uuid, "In Progress");
+                    // Point 1: document the status transition.
+                    char note[256];
+                    snprintf(note, sizeof(note),
+                             "Status set to In Progress. Agent %s (%s) started work.",
+                             a->name, a->role);
+                    fossil_ticket_add_note(tickets[t].tkt_uuid, note);
                 }
 
                 strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);
@@ -234,78 +245,155 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     char branch_name[32] = {0};
                     snprintf(branch_name, sizeof(branch_name), "tkt-%.8s", a->current_ticket);
 
-                    // Find hashes for next-role agents (for delegation instructions)
-                    char coder_hash[128] = {0};
+                    // Point 5: collect next-role hashes AND build agent roster for planner.
+                    char coder_hash[128]    = {0};
                     char reviewer_hash[128] = {0};
+                    char agent_roster[2048] = {0};
                     for (int j = 0; j < agent_count; j++) {
                         if (strcmp(agents[j].role, "coder") == 0 && !coder_hash[0])
                             strncpy(coder_hash, agents[j].hash, sizeof(coder_hash) - 1);
                         if (strcmp(agents[j].role, "reviewer") == 0 && !reviewer_hash[0])
                             strncpy(reviewer_hash, agents[j].hash, sizeof(reviewer_hash) - 1);
+                        char entry[512];
+                        snprintf(entry, sizeof(entry),
+                                 "  name: %s | role: %s | cli: %s | hash: %.8s\n"
+                                 "    desc: %s\n"
+                                 "    capabilities: %s\n",
+                                 agents[j].name, agents[j].role, agents[j].cli, agents[j].hash,
+                                 agents[j].description[0] ? agents[j].description : "(none)",
+                                 agents[j].capabilities[0] ? agents[j].capabilities : "(none)");
+                        strncat(agent_roster, entry,
+                                sizeof(agent_roster) - strlen(agent_roster) - 1);
                     }
+
+                    // Point 2/3: collect sub-tickets (comment contains [parent:<uuid>])
+                    // and dependency references ([depends:<uuid>]) for richer context.
+                    char parent_tag[72];
+                    snprintf(parent_tag, sizeof(parent_tag), "[parent:%s]", a->current_ticket);
+                    char subtasks_ctx[2048]  = {0};
+                    char dep_ctx[1024]       = {0};
+                    for (int t2 = 0; t2 < tkt_count; t2++) {
+                        if (strstr(tickets[t2].comment, parent_tag)) {
+                            char sub[256];
+                            snprintf(sub, sizeof(sub), "  [sub] %s: %s (status: %s)\n",
+                                     tickets[t2].tkt_uuid, tickets[t2].title,
+                                     tickets[t2].status);
+                            strncat(subtasks_ctx, sub,
+                                    sizeof(subtasks_ctx) - strlen(subtasks_ctx) - 1);
+                        }
+                        char dep_tag[72];
+                        snprintf(dep_tag, sizeof(dep_tag), "[depends:%s]", a->current_ticket);
+                        if (strstr(tickets[t2].comment, dep_tag)) {
+                            char dep[256];
+                            snprintf(dep, sizeof(dep), "  [dep] %s: %s (status: %s)\n",
+                                     tickets[t2].tkt_uuid, tickets[t2].title,
+                                     tickets[t2].status);
+                            strncat(dep_ctx, dep, sizeof(dep_ctx) - strlen(dep_ctx) - 1);
+                        }
+                    }
+
+                    // Truncate ticket description to leave room for instructions.
+                    char desc_short[4096];
+                    strncpy(desc_short, tkt_info.comment, sizeof(desc_short) - 1);
+                    desc_short[sizeof(desc_short) - 1] = '\0';
 
                     PulseMessage pmsg;
                     if (strcmp(a->role, "planner") == 0) {
-                        strcpy(pmsg.intent, "Plan and Delegate Ticket");
+                        strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
+                        // Point 5: planner sees full agent roster.
+                        // Point 2: planner must create sub-tickets for each task.
+                        // Point 3: planner sets dependency references between sub-tickets.
                         snprintf(pmsg.context, sizeof(pmsg.context),
-                                 "Ticket %s: %s\nDescription: %s\n\n"
-                                 "Your role is PLANNER. Analyze this ticket, write a clear plan, "
-                                 "then delegate to the coder by running these commands in your workspace "
-                                 "(you already have a fossil checkout here):\n"
-                                 "  fossil ticket set %s status \"Planned\"\n"
-                                 "  fossil ticket set %s private_contact \"%s\"\n"
+                                 "=== TICKET ===\n"
+                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== AVAILABLE AGENTS ===\n%s\n"
+                                 "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
+                                 "=== YOUR TASK (PLANNER) ===\n"
+                                 "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
+                                 "2. For EACH sub-task create a sub-ticket in your workspace checkout:\n"
+                                 "     fossil ticket add title \"<sub-task title>\" \\\n"
+                                 "       comment \"[parent:%s] <sub-task description>\" \\\n"
+                                 "       status \"Planned\" \\\n"
+                                 "       private_contact \"%s\"\n"
+                                 "   The private_contact must be the hash of the coder listed above.\n"
+                                 "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
+                                 "4. After creating all sub-tickets, close planning on the parent:\n"
+                                 "     fossil ticket set %s status \"Planned\"\n"
+                                 "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash: %s",
-                                 a->current_ticket, tkt_info.title, tkt_info.comment,
+                                 a->current_ticket, tkt_info.title, desc_short,
+                                 agent_roster,
+                                 subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
+                                 a->current_ticket, coder_hash,
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
                         strcpy(pmsg.current_state, "Planning");
                         strcpy(pmsg.next_action,
-                               "Analyze ticket, document plan, then run the fossil commands above to delegate to coder");
+                               "Decompose into sub-tickets, create each with fossil ticket add, then delegate parent to coder");
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
+                        // Point 4: explicit code-creation and commit requirement.
+                        // Point 3: show dependency and sub-ticket context.
                         snprintf(pmsg.context, sizeof(pmsg.context),
-                                 "Ticket %s: %s\nDescription: %s\n\n"
-                                 "Your role is CODER. Create a dedicated branch and implement the task:\n"
-                                 "  fossil branch new %s trunk\n"
-                                 "  fossil update %s\n"
-                                 "Make your changes and commit them on this branch. "
-                                 "When done, submit for review:\n"
-                                 "  fossil ticket set %s status \"Review\"\n"
-                                 "  fossil ticket set %s private_contact \"%s\"\n"
+                                 "=== TICKET ===\n"
+                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== RELATED SUB-TICKETS ===\n%s\n"
+                                 "=== DEPENDENCY CONTEXT ===\n%s\n"
+                                 "=== YOUR TASK (CODER) ===\n"
+                                 "1. Create a dedicated branch:\n"
+                                 "     fossil branch new %s trunk\n"
+                                 "     fossil update %s\n"
+                                 "2. READ the ticket and all sub-tickets listed above.\n"
+                                 "3. WRITE CODE: create or modify source files to implement the task.\n"
+                                 "   YOU MUST PRODUCE REAL FILE CHANGES. Planning or describing the\n"
+                                 "   solution is NOT sufficient — actual code must be written.\n"
+                                 "4. COMMIT your changes (required before submitting for review):\n"
+                                 "     fossil commit -m \"Implement %s: %s\"\n"
+                                 "5. Submit for review only AFTER committing:\n"
+                                 "     fossil ticket set %s status \"Review\"\n"
+                                 "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
-                                 a->current_ticket, tkt_info.title, tkt_info.comment,
+                                 a->current_ticket, tkt_info.title, desc_short,
+                                 subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
+                                 dep_ctx[0] ? dep_ctx : "  (none)\n",
                                  branch_name, branch_name,
+                                 a->current_ticket, tkt_info.title,
                                  a->current_ticket, a->current_ticket, reviewer_hash, reviewer_hash);
                         strcpy(pmsg.current_state, "Coding");
                         strcpy(pmsg.next_action,
-                               "Create branch, implement task, commit changes, then delegate to reviewer via fossil commands");
+                               "Create branch, write code files, commit, then set ticket to Review");
                     } else if (strcmp(a->role, "reviewer") == 0) {
                         strcpy(pmsg.intent, "Review and Merge Branch");
                         snprintf(pmsg.context, sizeof(pmsg.context),
-                                 "Ticket %s: %s\nDescription: %s\n\n"
-                                 "Your role is REVIEWER. Review the work on branch '%s':\n"
-                                 "  fossil update %s\n"
-                                 "If the work is acceptable, merge it into trunk and close the ticket:\n"
-                                 "  fossil update trunk\n"
-                                 "  fossil merge %s\n"
-                                 "  fossil commit -m \"Merge %s: %s\"\n"
-                                 "  fossil ticket set %s status \"Done\"\n"
-                                 "If the work needs changes, request rework:\n"
-                                 "  fossil ticket set %s status \"Rework\"\n"
-                                 "  fossil ticket set %s private_contact \"%s\"\n"
+                                 "=== TICKET ===\n"
+                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== SUB-TICKETS ===\n%s\n"
+                                 "=== YOUR TASK (REVIEWER) ===\n"
+                                 "1. Check out the implementation branch:\n"
+                                 "     fossil update %s\n"
+                                 "2. Review ALL sub-tickets listed above and their committed code.\n"
+                                 "3. If acceptable, merge into trunk and close:\n"
+                                 "     fossil update trunk\n"
+                                 "     fossil merge %s\n"
+                                 "     fossil commit -m \"Merge %s: %s\"\n"
+                                 "     fossil ticket set %s status \"Done\"\n"
+                                 "4. If rework is needed, explain why and return to coder:\n"
+                                 "     fossil ticket set %s status \"Rework\"\n"
+                                 "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash (for rework): %s",
-                                 a->current_ticket, tkt_info.title, tkt_info.comment,
-                                 branch_name, branch_name,
+                                 a->current_ticket, tkt_info.title, desc_short,
+                                 subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
+                                 branch_name,
                                  branch_name, branch_name, tkt_info.title,
                                  a->current_ticket,
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
                         strcpy(pmsg.current_state, "Reviewing");
                         strcpy(pmsg.next_action,
-                               "Check out branch, review changes, then merge+close or request rework via fossil commands");
+                               "Check branch, verify code and sub-tickets, then merge+Done or Rework");
                     } else {
                         strcpy(pmsg.intent, "Start Ticket");
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "Ticket %s: %s\nDescription: %s",
-                                 a->current_ticket, tkt_info.title, tkt_info.comment);
+                                 a->current_ticket, tkt_info.title, desc_short);
                         strcpy(pmsg.current_state, "New");
                         strcpy(pmsg.next_action, "Read repository, plan and execute the task");
                     }
@@ -330,11 +418,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
             if (ticket_steps[i] >= MAX_STEPS_PER_TICKET) {
                 a->state = AGENT_STATE_BLOCKED;
                 char log[256];
-                snprintf(log, sizeof(log), "[!] %s hit MAX_STEPS (%d) on ticket %s. Blocked.", a->name, MAX_STEPS_PER_TICKET, a->current_ticket);
+                snprintf(log, sizeof(log), "[!] %s hit MAX_STEPS (%d) on ticket %s. Blocked.",
+                         a->name, MAX_STEPS_PER_TICKET, a->current_ticket);
                 log_message(log);
-                
-                // Inform via fossil
                 fossil_ticket_set_status(a->current_ticket, "Blocked");
+                // Point 1: document reason for Blocked transition.
+                char note[256];
+                snprintf(note, sizeof(note),
+                         "BLOCKED: agent %s reached MAX_STEPS (%d). Manual intervention required.",
+                         a->name, MAX_STEPS_PER_TICKET);
+                fossil_ticket_add_note(a->current_ticket, note);
                 continue;
             }
 

@@ -17,12 +17,14 @@ typedef struct {
     char cli[64];
     char cmd[512];
     char hash[41];
+    char description[256];
+    char capabilities[256];
     AgentState state;
     int last_heartbeat; // simulated seconds ago
     char current_ticket[64];
 } Agent;
 
-#define MAX_AGENTS 100
+#define MAX_AGENTS 10
 
 // Mock data generation
 void mock_agents(Agent *agents, int *count);

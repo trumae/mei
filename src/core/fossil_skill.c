@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "ui.h"
 
 static char global_repo_path[1024] = {0};
@@ -142,5 +143,21 @@ bool fossil_ticket_set_status(const char *ticket_id, const char *status) {
 bool fossil_commit(const char *workspace, const char *message) {
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "cd %s && fossil commit -m \"%s\"", workspace, message);
+    return run_cmd(cmd);
+}
+
+bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
+    if (!global_repo_path[0] || !ticket_id || !note) return false;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    // Format: [MEI YYYY-MM-DD HH:MM] <note> — stored in 'changelog' field.
+    // Notes are orchestrator-generated (no shell-special chars), so direct quoting is safe.
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "fossil ticket set %s changelog \"[MEI %04d-%02d-%02d %02d:%02d] %s\" -R %s",
+             ticket_id,
+             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+             t->tm_hour, t->tm_min,
+             note, global_repo_path);
     return run_cmd(cmd);
 }

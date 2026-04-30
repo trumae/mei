@@ -41,4 +41,10 @@ bool fossil_ticket_set_status(const char *ticket_id, const char *status);
 // Commit changes in a specific workspace
 bool fossil_commit(const char *workspace, const char *message);
 
+// Append an orchestrator note to the ticket's changelog field.
+// Used to explain WHY the orchestrator made a change (assignment, status transitions, etc.).
+// The note is stored in the 'changelog' field; all prior values are preserved in
+// `fossil ticket history <uuid>` even though only the latest is visible inline.
+bool fossil_ticket_add_note(const char *ticket_id, const char *note);
+
 #endif // FOSSIL_SKILL_H
