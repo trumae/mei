@@ -1,6 +1,8 @@
 #ifndef AGENT_H
 #define AGENT_H
 
+#include "config.h"
+
 typedef enum {
     AGENT_STATE_OPEN,
     AGENT_STATE_IN_PROGRESS,
@@ -17,7 +19,7 @@ typedef struct {
     char cli[64];
     char cmd[512];
     char hash[41];
-    char description[256];
+    char description[MEI_TEXT_BUFFER_SIZE];
     char capabilities[256];
     AgentState state;
     int last_heartbeat; // simulated seconds ago

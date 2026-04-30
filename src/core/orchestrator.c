@@ -248,13 +248,13 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // Point 5: collect next-role hashes AND build agent roster for planner.
                     char coder_hash[128]    = {0};
                     char reviewer_hash[128] = {0};
-                    char agent_roster[2048] = {0};
+                    char agent_roster[MEI_TEXT_BUFFER_SIZE] = {0};
                     for (int j = 0; j < agent_count; j++) {
                         if (strcmp(agents[j].role, "coder") == 0 && !coder_hash[0])
                             strncpy(coder_hash, agents[j].hash, sizeof(coder_hash) - 1);
                         if (strcmp(agents[j].role, "reviewer") == 0 && !reviewer_hash[0])
                             strncpy(reviewer_hash, agents[j].hash, sizeof(reviewer_hash) - 1);
-                        char entry[512];
+                        char entry[MEI_TEXT_BUFFER_SIZE];
                         snprintf(entry, sizeof(entry),
                                  "  name: %s | role: %s | cli: %s | hash: %.8s\n"
                                  "    desc: %s\n"
@@ -270,8 +270,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // and dependency references ([depends:<uuid>]) for richer context.
                     char parent_tag[72];
                     snprintf(parent_tag, sizeof(parent_tag), "[parent:%s]", a->current_ticket);
-                    char subtasks_ctx[2048]  = {0};
-                    char dep_ctx[1024]       = {0};
+                    char subtasks_ctx[MEI_TEXT_BUFFER_SIZE]  = {0};
+                    char dep_ctx[MEI_TEXT_BUFFER_SIZE]       = {0};
                     for (int t2 = 0; t2 < tkt_count; t2++) {
                         if (strstr(tickets[t2].comment, parent_tag)) {
                             char sub[256];
@@ -284,7 +284,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         char dep_tag[72];
                         snprintf(dep_tag, sizeof(dep_tag), "[depends:%s]", a->current_ticket);
                         if (strstr(tickets[t2].comment, dep_tag)) {
-                            char dep[256];
+                            char dep[MEI_TEXT_BUFFER_SIZE];
                             snprintf(dep, sizeof(dep), "  [dep] %s: %s (status: %s)\n",
                                      tickets[t2].tkt_uuid, tickets[t2].title,
                                      tickets[t2].status);
