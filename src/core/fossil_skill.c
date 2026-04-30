@@ -61,13 +61,13 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     if (!global_repo_path[0]) return 0;
     
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "printf \".mode list\\nSELECT tkt_uuid || '|' || coalesce(title, '') || '|' || coalesce(status, '') || '|' || coalesce(private_contact, '') FROM ticket WHERE status != 'Closed' AND status != 'done';\\n\" | fossil sqlite -R %s 2>/dev/null", global_repo_path);
+    snprintf(cmd, sizeof(cmd), "printf \".mode list\\nSELECT tkt_uuid || '|' || coalesce(title, '') || '|' || coalesce(status, '') || '|' || coalesce(private_contact, '') || '|' || coalesce(comment, '') FROM ticket WHERE status != 'Closed' AND status != 'done';\\n\" | fossil sqlite -R %s 2>/dev/null", global_repo_path);
     
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
     
     int count = 0;
-    char line[512];
+    char line[MEI_TEXT_BUFFER_SIZE + 2048];
     while (fgets(line, sizeof(line), fp) && count < max_tickets) {
         line[strcspn(line, "\n")] = 0; // Remove newline
         
@@ -75,12 +75,14 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
         char *title = strtok(NULL, "|");
         char *status = strtok(NULL, "|");
         char *assignee = strtok(NULL, "|");
+        char *comment = strtok(NULL, "|");
         
         if (uuid) {
             strncpy(tickets[count].tkt_uuid, uuid, sizeof(tickets[count].tkt_uuid) - 1);
             strncpy(tickets[count].title, title ? title : "", sizeof(tickets[count].title) - 1);
             strncpy(tickets[count].status, status ? status : "Open", sizeof(tickets[count].status) - 1);
             strncpy(tickets[count].assignee, assignee ? assignee : "", sizeof(tickets[count].assignee) - 1);
+            strncpy(tickets[count].comment, comment ? comment : "", sizeof(tickets[count].comment) - 1);
             count++;
         }
     }

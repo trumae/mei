@@ -3,10 +3,12 @@
 
 #include <stddef.h>
 
+#include "config.h"
+
 // A structure representing the PULSE envelope
 typedef struct {
     char intent[128];
-    char context[256];
+    char context[MEI_TEXT_BUFFER_SIZE];
     char current_state[256];
     char next_action[256];
 } PulseMessage;

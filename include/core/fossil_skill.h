@@ -10,11 +10,14 @@ void fossil_set_repo_path(const char *path);
 // Get the current global fossil repository path
 const char *fossil_get_repo_path();
 
+#include "config.h"
+
 typedef struct {
     char tkt_uuid[64];
     char title[128];
     char status[64];
     char assignee[64]; // Mapped to private_contact in Fossil
+    char comment[MEI_TEXT_BUFFER_SIZE];
 } FossilTicket;
 
 // Initialize the fossil repository if not exists (Mock or Real)
