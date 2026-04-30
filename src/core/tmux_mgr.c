@@ -98,6 +98,15 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     return (res == 0);
 }
 
+bool tmux_send_enter(const char *agent_name) {
+    if (!tmux_session_exists(agent_name)) {
+        return false;
+    }
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "tmux send-keys -t '%s:\"%s\"' Enter", TMUX_SESSION, agent_name);
+    return system(cmd) == 0;
+}
+
 int tmux_capture_output(const char *agent_name, char *buffer, size_t max_size) {
     if (!tmux_session_exists(agent_name)) {
         return -1;

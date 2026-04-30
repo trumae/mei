@@ -16,6 +16,9 @@ bool tmux_kill_agent(const char *agent_name);
 // Sends a string (typically a PULSE protocol payload) to the agent's tmux session, followed by Enter (C-m).
 bool tmux_send_pulse(const char *agent_name, const char *pulse_payload);
 
+// Sends only an Enter key to the agent's tmux pane (used to dismiss dialogs).
+bool tmux_send_enter(const char *agent_name);
+
 // Captures the current visible pane output of the agent's tmux session.
 // Returns the number of bytes written to buffer, or -1 on error.
 int tmux_capture_output(const char *agent_name, char *buffer, size_t max_size);

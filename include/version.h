@@ -1,0 +1,15 @@
+#ifndef MEI_VERSION_H
+#define MEI_VERSION_H
+
+#define MEI_VERSION_MAJOR 0
+#define MEI_VERSION_MINOR 1
+#define MEI_VERSION_PATCH 0
+#define MEI_VERSION_STR   "0.1.0"
+
+#ifndef MEI_BUILD_HASH
+#define MEI_BUILD_HASH "unknown"
+#endif
+
+#define MEI_VERSION_FULL MEI_VERSION_STR "+" MEI_BUILD_HASH
+
+#endif // MEI_VERSION_H

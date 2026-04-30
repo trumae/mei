@@ -6,6 +6,7 @@
 #include <time.h>
 #include <ncurses.h>
 #include "ui.h"
+#include "version.h"
 #include "agent.h"
 #include "core/orchestrator.h"
 #include "core/fossil_skill.h"

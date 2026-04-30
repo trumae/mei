@@ -13,6 +13,9 @@
 // -1 means agent is in warm-up phase (waiting for CLI to be ready before sending first PULSE)
 static int ticket_steps[MAX_AGENTS] = {0};
 static int warm_up_ticks[MAX_AGENTS] = {0};
+// Set to 1 once the workspace trust dialog has been dismissed for each agent.
+// Persists for the lifetime of the process (trust is remembered by the CLI per workspace).
+static int trust_accepted[MAX_AGENTS] = {0};
 
 // Number of ticks to wait for CLI to warm up if no prompt is detected (safety timeout)
 #define CLI_WARMUP_TIMEOUT_TICKS 15
@@ -182,10 +185,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 warm_up_ticks[i]++;
                 char pane_rdy[2048];
                 int pane_len = tmux_capture_output(a->name, pane_rdy, sizeof(pane_rdy));
-                
+
                 // Check for common CLI ready indicators
                 int cli_ready = 0;
                 if (pane_len > 0) {
+                    // Dismiss the Claude Code workspace trust dialog before detecting the real prompt.
+                    // The dialog shows "\u276f 1. Yes, I trust this folder" \u2014 pressing Enter accepts it.
+                    // Without this, the PULSE would be swallowed by the dialog and never processed.
+                    if (!trust_accepted[i]) {
+                        if (strstr(pane_rdy, "Quick safety check") != NULL ||
+                            strstr(pane_rdy, "I trust this folder") != NULL) {
+                            tmux_send_enter(a->name);
+                            trust_accepted[i] = 1;
+                            char log[256];
+                            snprintf(log, sizeof(log), "[trust] Accepted workspace trust for %s", a->name);
+                            log_message(log);
+                            continue;
+                        }
+                    }
+
                     int found_prompt = (strstr(pane_rdy, "Ask anything") != NULL) ||
                                        (strstr(pane_rdy, "ask anything") != NULL) ||
                                        (strstr(pane_rdy, "\u276f")       != NULL) ||

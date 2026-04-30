@@ -2,6 +2,12 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -Iinclude -g
 LDFLAGS = -lncurses
 
+FOSSIL_HASH := $(shell fossil info 2>/dev/null | grep '^checkout:' | awk '{print substr($$2,1,12)}')
+ifeq ($(FOSSIL_HASH),)
+FOSSIL_HASH := unknown
+endif
+CFLAGS += -DMEI_BUILD_HASH=\"$(FOSSIL_HASH)\"
+
 SRC_DIR = src
 OBJ_DIR = obj
 BIN_DIR = bin

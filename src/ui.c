@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "version.h"
 #include <ncurses.h>
 #include <string.h>
 #include <stdlib.h>
@@ -92,7 +93,9 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
     werase(win_details);
     werase(win_log);
 
-    draw_borders(win_list, " Agents ");
+    char list_title[64];
+    snprintf(list_title, sizeof(list_title), " Agents - MEI %s ", MEI_VERSION_FULL);
+    draw_borders(win_list, list_title);
     draw_borders(win_details, " Details & Monitoring ");
     draw_borders(win_log, " Logs & Actions (q: quit, a: attach, p: pause, r: resume, k: kill) ");
 
