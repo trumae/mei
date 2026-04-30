@@ -71,13 +71,27 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     while (fgets(line, sizeof(line), fp) && count < max_tickets) {
         line[strcspn(line, "\n")] = 0; // Remove newline
         
-        char *uuid = strtok(line, "|");
-        char *title = strtok(NULL, "|");
-        char *status = strtok(NULL, "|");
-        char *assignee = strtok(NULL, "|");
-        char *comment = strtok(NULL, "|");
+        char *fields[5];
+        char *ptr = line;
+        for (int i = 0; i < 5; i++) {
+            fields[i] = ptr;
+            char *sep = strchr(ptr, '|');
+            if (sep) {
+                *sep = '\0';
+                ptr = sep + 1;
+            } else {
+                // Last field or missing fields
+                if (i < 4) ptr = ""; // Should not happen with well-formed output
+            }
+        }
         
-        if (uuid) {
+        char *uuid = fields[0];
+        char *title = fields[1];
+        char *status = fields[2];
+        char *assignee = fields[3];
+        char *comment = fields[4];
+        
+        if (uuid && strlen(uuid) > 0) {
             strncpy(tickets[count].tkt_uuid, uuid, sizeof(tickets[count].tkt_uuid) - 1);
             strncpy(tickets[count].title, title ? title : "", sizeof(tickets[count].title) - 1);
             strncpy(tickets[count].status, status ? status : "Open", sizeof(tickets[count].status) - 1);

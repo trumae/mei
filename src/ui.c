@@ -2,6 +2,8 @@
 #include <ncurses.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <time.h>
 
 #define MAX_LOG_MESSAGES 100
 
@@ -44,6 +46,7 @@ void destroy_ui() {
 }
 
 void log_message(const char *msg) {
+    // Add to ncurses buffer
     if (log_count < MAX_LOG_MESSAGES) {
         strncpy(log_messages[log_count], msg, 255);
         log_count++;
@@ -52,6 +55,15 @@ void log_message(const char *msg) {
             strcpy(log_messages[i], log_messages[i+1]);
         }
         strncpy(log_messages[MAX_LOG_MESSAGES - 1], msg, 255);
+    }
+
+    // Append to file for debugging
+    FILE *f = fopen("/tmp/mei.log", "a");
+    if (f) {
+        time_t now = time(NULL);
+        struct tm *t = localtime(&now);
+        fprintf(f, "[%02d:%02d:%02d] %s\n", t->tm_hour, t->tm_min, t->tm_sec, msg);
+        fclose(f);
     }
 }
 

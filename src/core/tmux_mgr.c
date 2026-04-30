@@ -59,20 +59,34 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
         return false;
     }
 
-    char cmd[4096];
-    char tmp_file[256];
-    snprintf(tmp_file, sizeof(tmp_file), "/tmp/pulse_%s.txt", agent_name);
-    
-    FILE *f = fopen(tmp_file, "w");
+    char tmp_payload[256];
+    snprintf(tmp_payload, sizeof(tmp_payload), "/tmp/pulse_%s.txt", agent_name);
+    FILE *f = fopen(tmp_payload, "w");
     if (!f) return false;
     fprintf(f, "%s", pulse_payload);
     fclose(f);
 
-    snprintf(cmd, sizeof(cmd), "tmux load-buffer %s && tmux paste-buffer -t %s:\"%s\" && tmux send-keys -t %s:\"%s\" C-m", 
-             tmp_file, TMUX_SESSION, agent_name, TMUX_SESSION, agent_name);
-    int res = system(cmd);
+    char tmp_script[256];
+    snprintf(tmp_script, sizeof(tmp_script), "/tmp/pulse_%s.sh", agent_name);
+    FILE *sf = fopen(tmp_script, "w");
+    if (!sf) { remove(tmp_payload); return false; }
     
-    remove(tmp_file);
+    // We send line by line with a small delay to avoid overwhelming the TUI.
+    fprintf(sf,
+            "#!/bin/bash\n"
+            "while IFS= read -r line || [ -n \"$line\" ]; do\n"
+            "  tmux send-keys -t '%s:\"%s\"' -l \"$line\"\n"
+            "  tmux send-keys -t '%s:\"%s\"' Enter\n"
+            "  sleep 0.1\n"
+            "done < '%s'\n",
+            TMUX_SESSION, agent_name, TMUX_SESSION, agent_name, tmp_payload);
+    fclose(sf);
+
+    system("chmod +x /tmp/pulse_*.sh");
+    int res = system(tmp_script);
+    
+    remove(tmp_payload);
+    remove(tmp_script);
     return (res == 0);
 }
 

@@ -59,12 +59,13 @@ int agent_mgr_load_all(Agent *agents) {
                         pclose(cat_fp);
                         
                         // Compute SHA1 hash of the agent name for private_contact matching
+                        // Use cut instead of awk to avoid env issues in popen
                         char hash_cmd[256];
-                        snprintf(hash_cmd, sizeof(hash_cmd), "echo -n \"%s\" | shasum | awk '{print $1}'", a->name);
+                        snprintf(hash_cmd, sizeof(hash_cmd), "printf '%%s' \"%s\" | shasum | cut -d' ' -f1", a->name);
                         FILE *hash_fp = popen(hash_cmd, "r");
                         if (hash_fp) {
                             if (fgets(a->hash, sizeof(a->hash), hash_fp)) {
-                                a->hash[strcspn(a->hash, "\n")] = 0;
+                                a->hash[strcspn(a->hash, "\n \t")] = 0; // strip newline and trailing spaces
                             }
                             pclose(hash_fp);
                         }
