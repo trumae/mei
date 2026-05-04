@@ -190,6 +190,34 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
     return run_cmd(cmd);
 }
 
+int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_size) {
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+
+    buffer[0] = '\0';
+    char page_name[32];
+    snprintf(page_name, sizeof(page_name), "ticket-%.10s", ticket_id);
+
+    char tmp_path[64] = "/tmp/mei_wiki_read_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) return 0;
+    close(fd);
+
+    char export_cmd[1024];
+    snprintf(export_cmd, sizeof(export_cmd),
+             "fossil wiki export \"%s\" %s -R %s >/dev/null 2>&1",
+             page_name, tmp_path, global_repo_path);
+    system(export_cmd);
+
+    FILE *f = fopen(tmp_path, "r");
+    if (!f) { unlink(tmp_path); return 0; }
+
+    size_t total = fread(buffer, 1, max_size - 1, f);
+    buffer[total] = '\0';
+    fclose(f);
+    unlink(tmp_path);
+    return (int)total;
+}
+
 bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char *message) {
     if (!global_repo_path[0] || !ticket_id || !agent || !message) return false;
 

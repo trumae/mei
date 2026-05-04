@@ -52,4 +52,8 @@ bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char
 // `fossil ticket history <uuid>` even though only the latest is visible inline.
 bool fossil_ticket_add_note(const char *ticket_id, const char *note);
 
+// Read the accumulated wiki log for a ticket (ticket-<uuid10> page) into buffer.
+// Returns the number of bytes read, or 0 if the page doesn't exist yet.
+int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_size);
+
 #endif // FOSSIL_SKILL_H
