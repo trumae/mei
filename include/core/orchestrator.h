@@ -5,7 +5,8 @@
 
 // Configuration constants for the Orchestrator
 #define TICK_INTERVAL_MS 2000
-#define MAX_STEPS_PER_TICKET 50
+// 300 ticks × 2s = 10 minutes before an agent is declared stalled
+#define MAX_STEPS_PER_TICKET 300
 
 // Initializes the orchestrator and loads agents from disk/config
 void orchestrator_init(Agent *agents, int *agent_count);

@@ -202,11 +202,15 @@ void orchestrator_tick(Agent *agents, int agent_count) {
             // Skip during warm-up (ticket_steps == -1) to avoid a false positive right
             // after assignment, before the AI has had a chance to do anything.
             if (ticket_steps[i] != -1) {
+                char final_status[64]  = {0};
+                char final_notes[512]  = {0};
                 int still_active = 0;
                 for (int t = 0; t < tkt_count; t++) {
                     if (strcmp(tickets[t].tkt_uuid, a->current_ticket) == 0) {
                         still_active = (strcasecmp(tickets[t].status, "In Progress") == 0) &&
                                        (strcmp(tickets[t].assignee, a->hash) == 0);
+                        strncpy(final_status, tickets[t].status,        sizeof(final_status) - 1);
+                        strncpy(final_notes,  tickets[t].reviewer_notes, sizeof(final_notes)  - 1);
                         break;
                     }
                 }
@@ -216,6 +220,20 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "[done] %s finished ticket %s → back to OPEN",
                              a->name, a->current_ticket);
                     log_message(done_log);
+
+                    // Log the outcome to the ticket's wiki page so it's visible in Fossil web.
+                    char wiki_msg[1024];
+                    if (final_notes[0]) {
+                        snprintf(wiki_msg, sizeof(wiki_msg),
+                                 "(%s) completed work. Ticket moved to **%s**. Reviewer notes: %s",
+                                 a->role, final_status[0] ? final_status : "unknown", final_notes);
+                    } else {
+                        snprintf(wiki_msg, sizeof(wiki_msg),
+                                 "(%s) completed work. Ticket moved to **%s**.",
+                                 a->role, final_status[0] ? final_status : "unknown");
+                    }
+                    fossil_wiki_append_log(a->current_ticket, a->name, wiki_msg);
+
                     a->state = AGENT_STATE_OPEN;
                     strcpy(a->current_ticket, "None");
                     ticket_steps[i] = 0;
@@ -367,6 +385,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== REVIEWER FEEDBACK ===\n%s\n\n"
                                  "=== RELATED SUB-TICKETS ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
                                  "=== YOUR TASK (CODER) ===\n"
@@ -388,6 +407,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
                                  a->current_ticket, tkt_info.title, desc_short,
+                                 tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none - first attempt)",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
                                  branch_name, branch_name,
@@ -419,17 +439,19 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil merge %s\n"
                                  "     fossil commit -m \"Merge %s: %s\"\n"
                                  "     fossil ticket set %s status \"Done\"\n"
-                                 "5. If ANYTHING is incomplete or wrong, return for rework with a clear\n"
-                                 "   explanation of exactly what needs to be fixed:\n"
+                                 "5. If ANYTHING is incomplete or wrong:\n"
+                                 "   FIRST record the rejection reason (the coder will read this):\n"
+                                 "     fossil ticket set %s reviewer_notes \"REJECTION: <exact issues>\"\n"
+                                 "   THEN return for rework:\n"
                                  "     fossil ticket set %s status \"Rework\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
-                                 "   Then explain the rejection reason in plain text.\n"
                                  "Coder hash (for rework): %s\n"
                                  "REMEMBER: approving bad code harms the project. When in doubt, reject.",
                                  a->current_ticket, tkt_info.title, desc_short,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  branch_name,
                                  branch_name, branch_name, tkt_info.title,
+                                 a->current_ticket,
                                  a->current_ticket,
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
                         strcpy(pmsg.current_state, "Reviewing");
@@ -452,6 +474,12 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     char log[256];
                     snprintf(log, sizeof(log), "[PULSE] Sent initial PULSE to %s after %d warmup ticks", a->name, warm_up_ticks[i]);
                     log_message(log);
+
+                    // Record the dispatch in the ticket's wiki page for human visibility.
+                    char wiki_msg[512];
+                    snprintf(wiki_msg, sizeof(wiki_msg),
+                             "(%s) received task — %s", a->role, pmsg.next_action);
+                    fossil_wiki_append_log(a->current_ticket, a->name, wiki_msg);
                 } else {
                     char log[256];
                     snprintf(log, sizeof(log), "[wait] %s CLI not ready yet (tick %d)", a->name, warm_up_ticks[i]);
@@ -460,7 +488,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 continue; // Don't execute the rest of IN_PROGRESS logic during warm-up
             }
 
-            // Check if agent hit the MAX_STEPS_PER_TICKET
+            // Count active ticks so a stalled agent is eventually unblocked.
+            ticket_steps[i]++;
+
+            // Stall detection: if the agent has been In Progress for MAX_STEPS ticks
+            // without completing, declare it blocked and record the failure.
             if (ticket_steps[i] >= MAX_STEPS_PER_TICKET) {
                 a->state = AGENT_STATE_BLOCKED;
                 char log[256];
@@ -468,12 +500,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                          a->name, MAX_STEPS_PER_TICKET, a->current_ticket);
                 log_message(log);
                 fossil_ticket_set_status(a->current_ticket, "Blocked");
-                // Point 1: document reason for Blocked transition.
                 char note[256];
                 snprintf(note, sizeof(note),
-                         "BLOCKED: agent %s reached MAX_STEPS (%d). Manual intervention required.",
-                         a->name, MAX_STEPS_PER_TICKET);
+                         "BLOCKED: agent %s stalled after %d ticks (~%d min). Manual intervention required.",
+                         a->name, MAX_STEPS_PER_TICKET, (MAX_STEPS_PER_TICKET * TICK_INTERVAL_MS) / 60000);
                 fossil_ticket_add_note(a->current_ticket, note);
+                char wiki_msg[256];
+                snprintf(wiki_msg, sizeof(wiki_msg),
+                         "(%s) **STALLED** after %d ticks (~%d min) without completing. Ticket set to Blocked — human intervention required.",
+                         a->role, MAX_STEPS_PER_TICKET, (MAX_STEPS_PER_TICKET * TICK_INTERVAL_MS) / 60000);
+                fossil_wiki_append_log(a->current_ticket, a->name, wiki_msg);
                 continue;
             }
 
