@@ -181,6 +181,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     fossil_ticket_add_note(tickets[t].tkt_uuid, note);
                 }
 
+                // Update the in-memory snapshot so other agents in this same tick
+                // don't see this ticket as available and claim it concurrently.
+                strncpy(tickets[t].assignee, a->hash,      sizeof(tickets[t].assignee) - 1);
+                strncpy(tickets[t].status,   "In Progress", sizeof(tickets[t].status)   - 1);
+
                 strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);
                 a->state = AGENT_STATE_IN_PROGRESS;
                 ticket_steps[i] = -1;
@@ -202,8 +207,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
             // Skip during warm-up (ticket_steps == -1) to avoid a false positive right
             // after assignment, before the AI has had a chance to do anything.
             if (ticket_steps[i] != -1) {
-                char final_status[64]  = {0};
-                char final_notes[512]  = {0};
+                char final_status[64]   = {0};
+                char final_notes[4096]  = {0};
                 int still_active = 0;
                 for (int t = 0; t < tkt_count; t++) {
                     if (strcmp(tickets[t].tkt_uuid, a->current_ticket) == 0) {
@@ -348,6 +353,12 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     strncpy(desc_short, tkt_info.comment, sizeof(desc_short) - 1);
                     desc_short[sizeof(desc_short) - 1] = '\0';
 
+                    // Read accumulated discussion history from the ticket's wiki page.
+                    // The orchestrator writes to this page on every status transition, so it
+                    // contains a chronological log of all agent actions and reviewer rejections.
+                    char discussion_log[4096] = {0};
+                    fossil_ticket_read_wiki_log(a->current_ticket, discussion_log, sizeof(discussion_log));
+
                     PulseMessage pmsg;
                     if (strcmp(a->role, "planner") == 0) {
                         strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
@@ -357,6 +368,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== DISCUSSION HISTORY ===\n%s\n\n"
                                  "=== AVAILABLE AGENTS ===\n%s\n"
                                  "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
                                  "=== YOUR TASK (PLANNER) ===\n"
@@ -373,6 +385,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash: %s",
                                  a->current_ticket, tkt_info.title, desc_short,
+                                 discussion_log[0] ? discussion_log : "  (no history yet)\n",
                                  agent_roster,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
                                  a->current_ticket, coder_hash,
@@ -385,28 +398,33 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
-                                 "=== REVIEWER FEEDBACK ===\n%s\n\n"
+                                 "=== DISCUSSION HISTORY (all past agent activity on this ticket) ===\n%s\n\n"
+                                 "=== LATEST REVIEWER FEEDBACK ===\n%s\n\n"
                                  "=== RELATED SUB-TICKETS ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
                                  "=== YOUR TASK (CODER) ===\n"
-                                 "1. Create a dedicated branch:\n"
+                                 "1. READ the discussion history above carefully before starting — it contains\n"
+                                 "   all prior reviewer rejections with their exact reasons. Address EVERY\n"
+                                 "   issue raised in previous cycles, not just the latest one.\n"
+                                 "2. Create a dedicated branch:\n"
                                  "     fossil branch new %s trunk\n"
                                  "     fossil update %s\n"
-                                 "2. READ the ticket description carefully. Implement EXACTLY what is asked.\n"
+                                 "3. READ the ticket description carefully. Implement EXACTLY what is asked.\n"
                                  "   Do NOT use your own name, agent name, or placeholder values anywhere\n"
                                  "   in the code (e.g. module names, package names, comments).\n"
                                  "   Use names derived from the ticket title and project context.\n"
-                                 "3. WRITE COMPLETE CODE — not stubs, not Hello World unless the ticket\n"
+                                 "4. WRITE COMPLETE CODE — not stubs, not Hello World unless the ticket\n"
                                  "   explicitly asks for a Hello World. Every function must be implemented.\n"
                                  "   The code must compile and run without errors.\n"
-                                 "4. VERIFY before submitting: build and run the code to confirm it works.\n"
-                                 "5. COMMIT your changes:\n"
+                                 "5. VERIFY before submitting: build and run the code to confirm it works.\n"
+                                 "6. COMMIT your changes:\n"
                                  "     fossil commit -m \"Implement %s: %s\"\n"
-                                 "6. Submit for review only AFTER committing and verifying:\n"
+                                 "7. Submit for review only AFTER committing and verifying:\n"
                                  "     fossil ticket set %s status \"Review\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
                                  a->current_ticket, tkt_info.title, desc_short,
+                                 discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
                                  tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none - first attempt)",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
@@ -421,33 +439,40 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== DISCUSSION HISTORY (all prior review cycles on this ticket) ===\n%s\n\n"
                                  "=== SUB-TICKETS ===\n%s\n"
                                  "=== YOUR TASK (REVIEWER) — BE STRICT ===\n"
-                                 "1. Check out the implementation branch:\n"
+                                 "1. READ the discussion history above — if there were prior rejections, verify\n"
+                                 "   that EVERY previously reported issue has been fully addressed.\n"
+                                 "2. Check out the implementation branch:\n"
                                  "     fossil update %s\n"
-                                 "2. Read EVERY file that was changed. Use `fossil diff --from trunk` to\n"
+                                 "3. Read EVERY file that was changed. Use `fossil diff --from trunk` to\n"
                                  "   see exactly what was added or modified.\n"
-                                 "3. Verify EACH requirement in the ticket description is fully satisfied:\n"
+                                 "4. Verify EACH requirement in the ticket description is fully satisfied:\n"
                                  "   - If the ticket asks for specific files, check they exist and are non-trivial.\n"
                                  "   - If the ticket asks for working code, BUILD and RUN it (e.g. `go build ./...`,\n"
                                  "     `go vet ./...`, run tests if present).\n"
                                  "   - Reject placeholder/stub code (e.g. empty functions, Hello World where real\n"
                                  "     logic was expected, hardcoded values, TODO comments left in).\n"
                                  "   - Reject if module/package names are nonsensical (agent names, temp names).\n"
-                                 "4. Only if ALL requirements are genuinely met, merge into trunk:\n"
+                                 "5. Only if ALL requirements are genuinely met, merge into trunk:\n"
                                  "     fossil update trunk\n"
                                  "     fossil merge %s\n"
                                  "     fossil commit -m \"Merge %s: %s\"\n"
                                  "     fossil ticket set %s status \"Done\"\n"
-                                 "5. If ANYTHING is incomplete or wrong:\n"
-                                 "   FIRST record the rejection reason (the coder will read this):\n"
-                                 "     fossil ticket set %s reviewer_notes \"REJECTION: <exact issues>\"\n"
+                                 "6. If ANYTHING is incomplete or wrong:\n"
+                                 "   FIRST record the COMPLETE rejection reason — list every specific issue\n"
+                                 "   with file names, line numbers, and exact problems found. Be thorough:\n"
+                                 "     fossil ticket set %s reviewer_notes \"REJECTION: <complete list of issues>\"\n"
                                  "   THEN return for rework:\n"
                                  "     fossil ticket set %s status \"Rework\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash (for rework): %s\n"
-                                 "REMEMBER: approving bad code harms the project. When in doubt, reject.",
+                                 "REMEMBER: approving bad code harms the project. When in doubt, reject.\n"
+                                 "Your rejection notes will be preserved in the discussion history so the\n"
+                                 "coder and future reviewers can see the full context of past decisions.",
                                  a->current_ticket, tkt_info.title, desc_short,
+                                 discussion_log[0] ? discussion_log : "  (no history yet — this is the first review)\n",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  branch_name,
                                  branch_name, branch_name, tkt_info.title,
