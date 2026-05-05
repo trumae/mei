@@ -316,10 +316,10 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                             strncpy(reviewer_hash, agents[j].hash, sizeof(reviewer_hash) - 1);
                         char entry[MEI_TEXT_BUFFER_SIZE];
                         snprintf(entry, sizeof(entry),
-                                 "  name: %s | role: %s | cli: %s | hash: %.8s\n"
+                                 "  name: %s | role: %s | hash: %s\n"
                                  "    desc: %s\n"
                                  "    capabilities: %s\n",
-                                 agents[j].name, agents[j].role, agents[j].cli, agents[j].hash,
+                                 agents[j].name, agents[j].role, agents[j].hash,
                                  agents[j].description[0] ? agents[j].description : "(none)",
                                  agents[j].capabilities[0] ? agents[j].capabilities : "(none)");
                         strncat(agent_roster, entry,
@@ -403,19 +403,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     } else {
                         snprintf(planner_task, sizeof(planner_task),
                                  "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
-                                 "   For each sub-task, choose the most appropriate agent from\n"
-                                 "   AVAILABLE AGENTS above based on their role and capabilities:\n"
-                                 "   - coder     → implementation, coding, building software\n"
-                                 "   - researcher → market research, data gathering, analysis,\n"
-                                 "                  documentation, external API investigation\n"
-                                 "   Do NOT assign every sub-task to the coder. Research and\n"
-                                 "   analysis tasks MUST go to the researcher.\n"
-                                 "2. For EACH sub-task create a sub-ticket, using the chosen agent's hash:\n"
+                                 "   For each sub-task, read AVAILABLE AGENTS above and choose the\n"
+                                 "   agent whose 'desc' and 'capabilities' best match the work needed.\n"
+                                 "   Do NOT default every sub-task to the same agent — use the full\n"
+                                 "   roster. The right agent is the one whose capabilities fit the task.\n"
+                                 "2. For EACH sub-task create a sub-ticket using the chosen agent's hash:\n"
                                  "     fossil ticket add title \"<sub-task title>\" \\\n"
                                  "       comment \"[parent:%s] <sub-task description>\" \\\n"
                                  "       status \"Planned\" \\\n"
-                                 "       private_contact \"<hash of the right agent for this task>\"\n"
-                                 "   Use exact hashes from the AVAILABLE AGENTS list above.\n"
+                                 "       private_contact \"<full hash from AVAILABLE AGENTS>\"\n"
+                                 "   Copy the full hash exactly as shown in the AVAILABLE AGENTS list.\n"
                                  "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
                                  "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
                                  "   MANDATORY so agents understand your thinking:\n"
