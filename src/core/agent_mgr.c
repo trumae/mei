@@ -41,7 +41,15 @@ int agent_mgr_load_all(Agent *agents) {
                         a->last_heartbeat = 0;
                         strcpy(a->current_ticket, "None");
 
+                        int in_description = 0;
                         while (fgets(line, sizeof(line), cat_fp)) {
+                            // Once inside the description block, accumulate every
+                            // subsequent line until EOF — no other fields follow it.
+                            if (in_description) {
+                                strncat(a->description, line,
+                                        sizeof(a->description) - strlen(a->description) - 1);
+                                continue;
+                            }
                             char key[64];
                             char value[1024];
                             if (sscanf(line, "%63[^:]: %[^\n]", key, value) == 2) {
@@ -55,6 +63,9 @@ int agent_mgr_load_all(Agent *agents) {
                                     strncpy(a->cmd, value, sizeof(a->cmd)-1);
                                 } else if (strcmp(key, "description") == 0) {
                                     strncpy(a->description, value, sizeof(a->description)-1);
+                                    strncat(a->description, "\n",
+                                            sizeof(a->description) - strlen(a->description) - 1);
+                                    in_description = 1;
                                 } else if (strcmp(key, "capabilities") == 0) {
                                     strncpy(a->capabilities, value, sizeof(a->capabilities)-1);
                                 }

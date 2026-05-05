@@ -314,14 +314,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                             strncpy(coder_hash, agents[j].hash, sizeof(coder_hash) - 1);
                         if (strcmp(agents[j].role, "reviewer") == 0 && !reviewer_hash[0])
                             strncpy(reviewer_hash, agents[j].hash, sizeof(reviewer_hash) - 1);
-                        char entry[MEI_TEXT_BUFFER_SIZE];
+                        // Truncate description to 800 chars in the roster so the
+                        // PULSE stays manageable when personas are long.
+                        char desc_preview[820];
+                        if (strlen(agents[j].description) > 800) {
+                            snprintf(desc_preview, sizeof(desc_preview),
+                                     "%.800s\n    [... truncated]", agents[j].description);
+                        } else {
+                            strncpy(desc_preview,
+                                    agents[j].description[0] ? agents[j].description : "(none)",
+                                    sizeof(desc_preview) - 1);
+                        }
+                        char entry[2048];
                         snprintf(entry, sizeof(entry),
                                  "  name: %s | role: %s | hash: %s\n"
-                                 "    desc: %s\n"
-                                 "    capabilities: %s\n",
+                                 "    capabilities: %s\n"
+                                 "    desc: %s\n",
                                  agents[j].name, agents[j].role, agents[j].hash,
-                                 agents[j].description[0] ? agents[j].description : "(none)",
-                                 agents[j].capabilities[0] ? agents[j].capabilities : "(none)");
+                                 agents[j].capabilities[0] ? agents[j].capabilities : "(none)",
+                                 desc_preview);
                         strncat(agent_roster, entry,
                                 sizeof(agent_roster) - strlen(agent_roster) - 1);
                     }
