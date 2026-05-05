@@ -359,6 +359,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     char discussion_log[4096] = {0};
                     fossil_ticket_read_wiki_log(a->current_ticket, discussion_log, sizeof(discussion_log));
 
+                    // Wiki page name for this ticket (first 10 chars, same as fossil_wiki_append_log).
+                    // Agents must write their reasoning here as a mandatory workflow step.
+                    char wiki_page[32];
+                    snprintf(wiki_page, sizeof(wiki_page), "ticket-%.10s", a->current_ticket);
+
+                    // Reusable shell command block agents paste into their terminal to append
+                    // a wiki entry.  Uses the open fossil checkout in their workspace (no -R needed).
+                    // IMPORTANT: use ./ prefix so the temp file is created inside the workspace
+                    // directory — opencode treats /tmp as an "external directory" requiring a
+                    // permission prompt, but files inside the workspace are always allowed.
+                    char wiki_cmd[512];
+                    snprintf(wiki_cmd, sizeof(wiki_cmd),
+                             "     TMP=$(mktemp ./.mei_wiki_XXXXXX)\n"
+                             "     fossil wiki export \"%s\" \"$TMP\" 2>/dev/null || true\n"
+                             "     # Append your entry to $TMP (echo, printf, or redirect a file)\n"
+                             "     fossil wiki commit \"%s\" \"$TMP\" || fossil wiki create \"%s\" \"$TMP\"\n"
+                             "     rm -f \"$TMP\"",
+                             wiki_page, wiki_page, wiki_page);
+
                     PulseMessage pmsg;
                     if (strcmp(a->role, "planner") == 0) {
                         strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
@@ -380,7 +399,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "       private_contact \"%s\"\n"
                                  "   The private_contact must be the hash of the coder listed above.\n"
                                  "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
-                                 "4. After creating all sub-tickets, close planning on the parent:\n"
+                                 "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
+                                 "   this is MANDATORY so that coders and reviewers understand your thinking:\n"
+                                 "%s\n"
+                                 "   Write a markdown section with:\n"
+                                 "   - Why you chose this decomposition (reasoning, not just a list)\n"
+                                 "   - Key technical risks and open questions you identified\n"
+                                 "   - Dependencies between sub-tasks and suggested execution order\n"
+                                 "   - Success criteria: what each sub-task must deliver to be considered done\n"
+                                 "   - Any assumptions you made about the requirements\n"
+                                 "5. After documenting, close planning on the parent:\n"
                                  "     fossil ticket set %s status \"Planned\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash: %s",
@@ -389,6 +417,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  agent_roster,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
                                  a->current_ticket, coder_hash,
+                                 wiki_page, wiki_cmd,
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
                         strcpy(pmsg.current_state, "Planning");
                         strcpy(pmsg.next_action,
@@ -419,7 +448,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "5. VERIFY before submitting: build and run the code to confirm it works.\n"
                                  "6. COMMIT your changes:\n"
                                  "     fossil commit -m \"Implement %s: %s\"\n"
-                                 "7. Submit for review only AFTER committing and verifying:\n"
+                                 "7. DOCUMENT your implementation in the ticket wiki page \"%s\" — MANDATORY\n"
+                                 "   before submitting. The reviewer and future agents will read this:\n"
+                                 "%s\n"
+                                 "   Write a markdown section with:\n"
+                                 "   - Approach taken and why (not just what, but why this design)\n"
+                                 "   - Key decisions and alternatives you considered and discarded\n"
+                                 "   - Exact commands used to build and test, and their output/result\n"
+                                 "   - Known limitations, assumptions, or technical debt introduced\n"
+                                 "   - If this is a rework: what specifically changed from the previous attempt\n"
+                                 "8. Submit for review only AFTER documenting:\n"
                                  "     fossil ticket set %s status \"Review\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
@@ -430,6 +468,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
                                  branch_name, branch_name,
                                  a->current_ticket, tkt_info.title,
+                                 wiki_page, wiki_cmd,
                                  a->current_ticket, a->current_ticket, reviewer_hash, reviewer_hash);
                         strcpy(pmsg.current_state, "Coding");
                         strcpy(pmsg.next_action,
@@ -455,26 +494,33 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   - Reject placeholder/stub code (e.g. empty functions, Hello World where real\n"
                                  "     logic was expected, hardcoded values, TODO comments left in).\n"
                                  "   - Reject if module/package names are nonsensical (agent names, temp names).\n"
-                                 "5. Only if ALL requirements are genuinely met, merge into trunk:\n"
+                                 "5. DOCUMENT your full review findings in the ticket wiki page \"%s\" — MANDATORY\n"
+                                 "   before taking any action. Future agents depend on this record:\n"
+                                 "%s\n"
+                                 "   Write a markdown section with:\n"
+                                 "   - Every file you reviewed and what you found\n"
+                                 "   - Every build/test command run and the exact output (pass/fail)\n"
+                                 "   - Whether each requirement in the ticket spec was met (yes/no + evidence)\n"
+                                 "   - VERDICT: APPROVED or REJECTED\n"
+                                 "   - If REJECTED: specific issues with file names, line numbers, exact problems\n"
+                                 "6. If ALL requirements met — merge into trunk AFTER documenting:\n"
                                  "     fossil update trunk\n"
                                  "     fossil merge %s\n"
                                  "     fossil commit -m \"Merge %s: %s\"\n"
                                  "     fossil ticket set %s status \"Done\"\n"
-                                 "6. If ANYTHING is incomplete or wrong:\n"
-                                 "   FIRST record the COMPLETE rejection reason — list every specific issue\n"
-                                 "   with file names, line numbers, and exact problems found. Be thorough:\n"
-                                 "     fossil ticket set %s reviewer_notes \"REJECTION: <complete list of issues>\"\n"
-                                 "   THEN return for rework:\n"
+                                 "7. If ANYTHING is incomplete or wrong — AFTER documenting in wiki:\n"
+                                 "   Record the summary rejection reason (coder will read this):\n"
+                                 "     fossil ticket set %s reviewer_notes \"REJECTION: <summary of issues>\"\n"
+                                 "   Return for rework:\n"
                                  "     fossil ticket set %s status \"Rework\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash (for rework): %s\n"
-                                 "REMEMBER: approving bad code harms the project. When in doubt, reject.\n"
-                                 "Your rejection notes will be preserved in the discussion history so the\n"
-                                 "coder and future reviewers can see the full context of past decisions.",
+                                 "REMEMBER: approving bad code harms the project. When in doubt, reject.",
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first review)\n",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  branch_name,
+                                 wiki_page, wiki_cmd,
                                  branch_name, branch_name, tkt_info.title,
                                  a->current_ticket,
                                  a->current_ticket,
