@@ -406,11 +406,12 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "2. If planning notes are absent from the wiki page \"%s\", add them now:\n"
                                  "%s\n"
                                  "   Write why this decomposition was chosen, key risks, and success criteria.\n"
-                                 "3. Close planning and hand off to coders:\n"
-                                 "     fossil ticket set %s status \"Planned\"\n"
-                                 "     fossil ticket set %s private_contact \"%s\"\n",
+                                 "3. Mark the parent ticket as Done — its work is complete once planned:\n"
+                                 "     fossil ticket set %s status \"Done\"\n"
+                                 "   The sub-tickets carry all remaining work. Do NOT assign the parent\n"
+                                 "   to any agent — it must not be picked up for implementation.\n",
                                  wiki_page, wiki_cmd,
-                                 a->current_ticket, a->current_ticket, coder_hash);
+                                 a->current_ticket);
                     } else {
                         snprintf(planner_task, sizeof(planner_task),
                                  "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
@@ -435,12 +436,14 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   - Dependencies between sub-tasks and suggested execution order\n"
                                  "   - Success criteria: what each sub-task must deliver to be done\n"
                                  "   - Any assumptions you made about the requirements\n"
-                                 "5. After documenting, close planning on the parent:\n"
-                                 "     fossil ticket set %s status \"Planned\"\n"
-                                 "     fossil ticket set %s private_contact \"%s\"\n",
+                                 "5. After documenting, mark the parent ticket as Done:\n"
+                                 "     fossil ticket set %s status \"Done\"\n"
+                                 "   The parent's job is to produce the sub-tickets. Once that is done,\n"
+                                 "   it must be closed. Do NOT assign it to any agent for implementation.\n"
+                                 "   All remaining work lives in the sub-tickets.\n",
                                  a->current_ticket,
                                  wiki_page, wiki_cmd,
-                                 a->current_ticket, a->current_ticket, coder_hash);
+                                 a->current_ticket);
                     }
 
                     // Persona header: inject the agent's own description so the LLM
