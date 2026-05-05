@@ -443,10 +443,22 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->current_ticket, a->current_ticket, coder_hash);
                     }
 
+                    // Persona header: inject the agent's own description so the LLM
+                    // operates as the defined persona for every task it receives.
+                    // Capped at 4096 chars — enough for rich personas, leaves ample
+                    // room in the 64KB context buffer for ticket + instructions.
+                    char persona_section[4160] = {0};
+                    if (a->description[0]) {
+                        snprintf(persona_section, sizeof(persona_section),
+                                 "=== YOUR PERSONA ===\n%.4096s\n\n",
+                                 a->description);
+                    }
+
                     PulseMessage pmsg;
                     if (strcmp(a->role, "planner") == 0) {
                         strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
                         snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "%s"
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
                                  "=== DISCUSSION HISTORY ===\n%s\n\n"
@@ -454,6 +466,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
                                  "=== YOUR TASK (PLANNER) ===\n"
                                  "%s",
+                                 persona_section,
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet)\n",
                                  agent_roster,
@@ -465,6 +478,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
                         snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "%s"
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
                                  "=== DISCUSSION HISTORY (all past agent activity on this ticket) ===\n%s\n\n"
@@ -501,6 +515,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s status \"Review\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
+                                 persona_section,
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
                                  tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none - first attempt)",
@@ -516,6 +531,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     } else if (strcmp(a->role, "reviewer") == 0) {
                         strcpy(pmsg.intent, "Review, Verify, and Merge or Reject");
                         snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "%s"
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
                                  "=== DISCUSSION HISTORY (all prior review cycles on this ticket) ===\n%s\n\n"
@@ -556,6 +572,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash (for rework): %s\n"
                                  "REMEMBER: approving bad code harms the project. When in doubt, reject.",
+                                 persona_section,
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first review)\n",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
@@ -571,6 +588,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     } else {
                         strcpy(pmsg.intent, "Research, Analyze, and Document Findings");
                         snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "%s"
                                  "=== TICKET ===\n"
                                  "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
                                  "=== DISCUSSION HISTORY ===\n%s\n\n"
@@ -601,6 +619,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s status \"Review\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
+                                 persona_section,
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
@@ -615,11 +634,15 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
                     char payload[MEI_TEXT_BUFFER_SIZE + 512];
                     pulse_format(&pmsg, payload, sizeof(payload));
-                    tmux_send_pulse(a->name, payload);
+                    bool pulse_ok = tmux_send_pulse(a->name, payload);
 
                     ticket_steps[i] = 0;
                     char log[256];
-                    snprintf(log, sizeof(log), "[PULSE] Sent initial PULSE to %s after %d warmup ticks", a->name, warm_up_ticks[i]);
+                    if (pulse_ok) {
+                        snprintf(log, sizeof(log), "[PULSE] Sent initial PULSE to %s after %d warmup ticks", a->name, warm_up_ticks[i]);
+                    } else {
+                        snprintf(log, sizeof(log), "[PULSE] FAILED to send PULSE to %s — tmux paste error (check /tmp/tmux_err.log)", a->name);
+                    }
                     log_message(log);
 
                     // Record the dispatch in the ticket's wiki page for human visibility.

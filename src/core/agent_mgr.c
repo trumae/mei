@@ -4,6 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void trim_trailing_whitespace(char *s) {
+    int len = (int)strlen(s);
+    while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\r' || s[len-1] == '\n'))
+        s[--len] = '\0';
+}
+
 int agent_mgr_load_all(Agent *agents) {
     int count = 0;
     const char *repo_path = fossil_get_repo_path();
@@ -85,6 +91,16 @@ int agent_mgr_load_all(Agent *agents) {
                             pclose(hash_fp);
                         }
                         
+                        // Strip trailing whitespace from all string fields so that
+                        // names like "researcher " (common editor artifact) don't
+                        // corrupt tmux session names and temp file paths downstream.
+                        trim_trailing_whitespace(a->name);
+                        trim_trailing_whitespace(a->role);
+                        trim_trailing_whitespace(a->cli);
+                        trim_trailing_whitespace(a->cmd);
+                        trim_trailing_whitespace(a->capabilities);
+                        trim_trailing_whitespace(a->description);
+
                         if (strlen(a->name) > 0) {
                             count++;
                         }

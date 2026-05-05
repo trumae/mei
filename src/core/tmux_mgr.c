@@ -76,11 +76,12 @@ bool tmux_send_pulse(const char *agent_name, const char *pulse_payload) {
     // -p enables bracketed-paste mode: the terminal application receives
     // ESC[200~...content...ESC[201~ which prevents TUI input widgets from
     // auto-submitting on embedded newlines within the multi-line PULSE.
+    // Quotes around the file path and window name guard against spaces.
     snprintf(cmd, sizeof(cmd),
-             "tmux load-buffer %s && "
-             "tmux paste-buffer -p -t %s:%s && "
+             "tmux load-buffer \"%s\" && "
+             "tmux paste-buffer -p -t %s:\"%s\" && "
              "sleep 0.5 && "
-             "tmux send-keys -t %s:%s Enter",
+             "tmux send-keys -t %s:\"%s\" Enter",
              tmp_payload,
              TMUX_SESSION, agent_name,
              TMUX_SESSION, agent_name);
