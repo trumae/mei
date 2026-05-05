@@ -378,19 +378,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "     rm -f \"$TMP\"",
                              wiki_page, wiki_page, wiki_page);
 
-                    PulseMessage pmsg;
-                    if (strcmp(a->role, "planner") == 0) {
-                        strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
-                        // Point 5: planner sees full agent roster.
-                        // Point 2: planner must create sub-tickets for each task.
-                        // Point 3: planner sets dependency references between sub-tickets.
-                        snprintf(pmsg.context, sizeof(pmsg.context),
-                                 "=== TICKET ===\n"
-                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
-                                 "=== DISCUSSION HISTORY ===\n%s\n\n"
-                                 "=== AVAILABLE AGENTS ===\n%s\n"
-                                 "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
-                                 "=== YOUR TASK (PLANNER) ===\n"
+                    // Build planner task instructions: if sub-tickets already exist for this
+                    // parent, the planner must NOT create new ones (would cause duplicates).
+                    // Instead it only needs to ensure wiki docs exist and close planning.
+                    char planner_task[2048] = {0};
+                    if (subtasks_ctx[0]) {
+                        snprintf(planner_task, sizeof(planner_task),
+                                 "*** SUB-TICKETS ALREADY EXIST — DO NOT CREATE MORE ***\n"
+                                 "Creating additional sub-tickets would produce duplicates. Your task:\n\n"
+                                 "1. Review the EXISTING SUB-TICKETS listed above to understand current state.\n"
+                                 "2. If planning notes are absent from the wiki page \"%s\", add them now:\n"
+                                 "%s\n"
+                                 "   Write why this decomposition was chosen, key risks, and success criteria.\n"
+                                 "3. Close planning and hand off to coders:\n"
+                                 "     fossil ticket set %s status \"Planned\"\n"
+                                 "     fossil ticket set %s private_contact \"%s\"\n",
+                                 wiki_page, wiki_cmd,
+                                 a->current_ticket, a->current_ticket, coder_hash);
+                    } else {
+                        snprintf(planner_task, sizeof(planner_task),
                                  "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
                                  "2. For EACH sub-task create a sub-ticket in your workspace checkout:\n"
                                  "     fossil ticket add title \"<sub-task title>\" \\\n"
@@ -400,25 +406,39 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   The private_contact must be the hash of the coder listed above.\n"
                                  "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
                                  "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
-                                 "   this is MANDATORY so that coders and reviewers understand your thinking:\n"
+                                 "   MANDATORY so coders and reviewers understand your thinking:\n"
                                  "%s\n"
                                  "   Write a markdown section with:\n"
                                  "   - Why you chose this decomposition (reasoning, not just a list)\n"
                                  "   - Key technical risks and open questions you identified\n"
                                  "   - Dependencies between sub-tasks and suggested execution order\n"
-                                 "   - Success criteria: what each sub-task must deliver to be considered done\n"
+                                 "   - Success criteria: what each sub-task must deliver to be done\n"
                                  "   - Any assumptions you made about the requirements\n"
                                  "5. After documenting, close planning on the parent:\n"
                                  "     fossil ticket set %s status \"Planned\"\n"
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Coder hash: %s",
+                                 a->current_ticket, coder_hash,
+                                 wiki_page, wiki_cmd,
+                                 a->current_ticket, a->current_ticket, coder_hash, coder_hash);
+                    }
+
+                    PulseMessage pmsg;
+                    if (strcmp(a->role, "planner") == 0) {
+                        strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
+                        snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "=== TICKET ===\n"
+                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== DISCUSSION HISTORY ===\n%s\n\n"
+                                 "=== AVAILABLE AGENTS ===\n%s\n"
+                                 "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
+                                 "=== YOUR TASK (PLANNER) ===\n"
+                                 "%s",
                                  a->current_ticket, tkt_info.title, desc_short,
                                  discussion_log[0] ? discussion_log : "  (no history yet)\n",
                                  agent_roster,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
-                                 a->current_ticket, coder_hash,
-                                 wiki_page, wiki_cmd,
-                                 a->current_ticket, a->current_ticket, coder_hash, coder_hash);
+                                 planner_task);
                         strcpy(pmsg.current_state, "Planning");
                         strcpy(pmsg.next_action,
                                "Decompose into sub-tickets, create each with fossil ticket add, then delegate parent to coder");
