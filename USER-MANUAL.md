@@ -1,86 +1,86 @@
-# MEI Orquestrador - Manual do Usuário
+# MEI Orchestrator - User Manual
 
-O **MEI** (Multi-Agent Environment Integrator) é um orquestrador C99 de alta performance desenhado para governar sistemas de inteligência artificial baseados em processos de linha de comando (CLI), rodando de forma resiliente e isolada através de sessões **Tmux**, e utilizando um repositório **Fossil** como sua *única fonte de verdade*.
-
----
-
-## 1. Princípios do Sistema
-
-- **Arquitetura Orientada a Heartbeat (Tick-based):** Agentes não operam em loop infinito desgovernado. Eles são amostrados periodicamente pelo Orquestrador, que distribui pacotes estruturados (PULSE) apenas se o agente estiver apto a executar o próximo passo.
-- **Fossil First:** Todo o estado, configuração e histórico (Timeline) vivem no repositório Fossil local (`.fossil`). O MEI só carrega o que estiver lá.
-- **Isolamento de Workspaces:** Cada agente ganha uma cópia do repositório Fossil em `/tmp/workspaces/<agente>` onde as modificações ocorrem sem colidir com outros atores do sistema.
-- **Protocolo PULSE:** Todas as instruções são empacotadas de maneira previsível.
+**MEI** (Multi-Agent Environment Integrator) is a high-performance C99 orchestrator designed to govern artificial intelligence systems based on command-line (CLI) processes, running resiliently and in isolation through **Tmux** sessions, and using a **Fossil** repository as its *single source of truth*.
 
 ---
 
-## 2. Compilando e Executando
+## 1. System Principles
 
-### Pré-requisitos
-- Compilador GCC (`-std=c99`)
-- Ncurses (`libncurses-dev` ou equivalente no macOS)
-- `tmux` instalado no sistema
-- `fossil` instalado no sistema
+- **Heartbeat-Oriented Architecture (Tick-based):** Agents do not run in uncontrolled infinite loops. They are sampled periodically by the Orchestrator, which distributes structured packets (PULSE) only if the agent is ready to execute the next step.
+- **Fossil First:** All state, configuration, and history (Timeline) live in the local Fossil repository (`.fossil`). MEI only loads what is there.
+- **Workspace Isolation:** Each agent gets a copy of the Fossil repository in `/tmp/workspaces/<agent>`, where changes happen without colliding with other system actors.
+- **PULSE Protocol:** All instructions are packaged in a predictable way.
+
+---
+
+## 2. Building and Running
+
+### Prerequisites
+- GCC compiler (`-std=c99`)
+- Ncurses (`libncurses-dev` or equivalent on macOS)
+- `tmux` installed on the system
+- `fossil` installed on the system
 
 ### Build
-Para construir o binário final `orchestrator_ui`:
+To build the final `orchestrator_ui` binary:
 ```bash
 make clean && make
 ```
 
-### Inicialização
-O programa necessita de um arquivo de repositório Fossil ativo.
+### Initialization
+The program requires an active Fossil repository file.
 ```bash
-./bin/orchestrator_ui <caminho_para_repositorio.fossil>
+./bin/orchestrator_ui <path_to_repository.fossil>
 ```
-*Exemplo:*
+*Example:*
 `./bin/orchestrator_ui /Users/viniciusmaciel/projs/MEI/repo.fossil`
 
 ---
 
-## 3. Configurando Agentes (Diretório `/.agents/`)
+## 3. Configuring Agents (`/.agents/` Directory)
 
-Os agentes são definidos por arquivos Markdown colocados no diretório `/.agents/` do seu projeto. O Orquestrador faz a leitura desses arquivos na inicialização para montar o pool de atores disponíveis.
+Agents are defined by Markdown files placed in your project's `/.agents/` directory. The Orchestrator reads these files at startup to build the pool of available actors.
 
-**Formato Esperado (`/.agents/planner.md`):**
+**Expected Format (`/.agents/planner.md`):**
 ```markdown
 name: planner-1
 role: planner
 cli: claude
 cmd: "claude-cli start --mode planner"
 ```
-*(Nota: a propriedade `name` não deve conter espaços e será o ID base para o workspace e o nome da sessão no tmux).*
+*(Note: the `name` property must not contain spaces and will be used as the base ID for the workspace and the tmux session name.)*
 
 ---
 
-## 4. Trabalhando na Interface Visual (Ncurses)
+## 4. Working in the Visual Interface (Ncurses)
 
-A interface do Orquestrador possui três painéis principais:
-- **Painel de Agentes (Esquerda):** Mostra os processos ativos e seus respectivos estados (`IN_PROGRESS`, `BLOCKED`, `PAUSED`).
-- **Painel de Detalhes (Direita):** Estatísticas detalhadas (tickets, CPU mockada/real, status do passo atual) sobre o agente destacado.
-- **Painel de Ações e Logs (Inferior):** Log do sistema em tempo real refletindo batimentos de Heartbeat e tráfego PULSE.
+The Orchestrator interface has three main panels:
+- **Agent Panel (Left):** Shows active processes and their respective states (`IN_PROGRESS`, `BLOCKED`, `PAUSED`).
+- **Details Panel (Right):** Detailed statistics (tickets, mocked/real CPU, current step status) about the highlighted agent.
+- **Actions and Logs Panel (Bottom):** Real-time system log reflecting Heartbeat ticks and PULSE traffic.
 
-### Atalhos Globais:
-- **`Seta Cima` / `Seta Baixo`**: Navega entre os agentes listados.
-- **`p` ou `P`**: **Pausa** o agente selecionado. Ele continuará vivo no Tmux, mas deixará de receber excitação do Heartbeat.
-- **`r` ou `R`**: **Retoma** a execução do agente selecionado.
-- **`k` ou `K`**: **Mata** o processo do agente selecionado, forçando o término da sessão `tmux`.
-- **`a` ou `A`**: **Anexa** a sua janela atual diretamente ao console `tmux` onde o agente roda. Excelente para *live debug* do output real gerado pelo LLM. Para desanexar e voltar ao Orquestrador, pressione o atalho local de detach do seu Tmux (geralmente `Ctrl+B, d`).
-- **`q` ou `Q`**: Desliga o orquestrador graciosamente, matando todas as sessões Tmux agregadas.
+### Global Shortcuts:
+- **`Up Arrow` / `Down Arrow`**: Navigate between listed agents.
+- **`p` or `P`**: **Pause** the selected agent. It stays alive in Tmux but stops receiving Heartbeat stimulation.
+- **`r` or `R`**: **Resume** execution of the selected agent.
+- **`k` or `K`**: **Kill** the selected agent process, forcing termination of its `tmux` session.
+- **`a` or `A`**: **Attach** your current window directly to the agent's `tmux` console. Excellent for *live debugging* the real output generated by the LLM. To detach and return to the Orchestrator, use your local Tmux detach shortcut (usually `Ctrl+B, d`).
+- **`q` or `Q`**: Gracefully shuts down the orchestrator, killing all managed Tmux sessions.
 
 ---
 
-## 5. Lidando com Falhas e o `MAX_STEPS_PER_TICKET`
+## 5. Handling Failures and `MAX_STEPS_PER_TICKET`
 
-Se um agente entra em loop contínuo e não resolve a demanda após um número limite de transições (por padrão, **50 pulsos**), a trava de segurança `MAX_STEPS_PER_TICKET` do MEI é acionada. 
+If an agent enters a continuous loop and does not solve the demand after a transition limit (by default, **50 pulses**), MEI's `MAX_STEPS_PER_TICKET` safety lock is triggered.
 
-**O que acontece:**
-1. O estado do Agente muda para `BLOCKED`.
-2. Uma instrução CLI é disparada para o Fossil, atualizando a *tag/status* do ticket correspondente para travado.
-3. Caberá a um agente **Revisor** ou a você (humano) acessar a thread e intervir com novas instruções manuais ou reassinar o ticket.
+**What happens:**
+1. The agent state changes to `BLOCKED`.
+2. A CLI instruction is sent to Fossil, updating the corresponding ticket's *tag/status* to blocked.
+3. A **Reviewer** agent or you (human) must access the thread and intervene with new manual instructions or reassign the ticket.
 
-## Nota
+## Note
 
-Se você criar um ticket usando a linha de comando do fossil: fossil ticket add title "Criar nova interface" comment "Mudar as cores para azul".
+If you create a ticket using the fossil command line: fossil ticket add title "Create new interface" comment "Change the colors to blue".
 
-Não utilize o campo sub-sistema do fossil para colocar o nome do agente. Este campo não está sendo utilizado pelo MEI. 
-O MEI busca o agente para quem ele está designado através do campo "private-contact".
+Do not use Fossil's subsystem field to store the agent name. This field is not used by MEI.
+MEI finds the assigned agent through the `private-contact` field.
