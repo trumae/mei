@@ -56,4 +56,9 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note);
 // Returns the number of bytes read, or 0 if the page doesn't exist yet.
 int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_size);
 
+// Read the full ticket details (all fields) for a given ticket UUID prefix.
+// Uses SQLite directly so all custom columns are included.
+// Returns the number of bytes written to buffer, or 0 on failure.
+int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size);
+
 #endif // FOSSIL_SKILL_H

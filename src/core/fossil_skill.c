@@ -190,6 +190,53 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
     return run_cmd(cmd);
 }
 
+int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size) {
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+
+    // Write the SQL query to a temp file to avoid shell-escaping issues with
+    // the ticket UUID being embedded in a popen() command string.
+    char tmp_sql[64] = "/tmp/mei_tkt_sql_XXXXXX";
+    int fd = mkstemp(tmp_sql);
+    if (fd < 0) return 0;
+
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp_sql); return 0; }
+
+    fprintf(f,
+        ".mode list\n"
+        "SELECT "
+        "'uuid:     ' || tkt_uuid         || char(10) ||"
+        "'title:    ' || coalesce(title,'')            || char(10) ||"
+        "'status:   ' || coalesce(status,'')           || char(10) ||"
+        "'type:     ' || coalesce(type,'')             || char(10) ||"
+        "'priority: ' || coalesce(priority,'')         || char(10) ||"
+        "'severity: ' || coalesce(severity,'')         || char(10) ||"
+        "'assignee: ' || coalesce(private_contact,'')  || char(10) ||"
+        "char(10) || '--- DESCRIPTION ---'             || char(10) ||"
+        "coalesce(nullif(comment,''),'(no description provided)') || char(10) ||"
+        "char(10) || '--- REVIEWER NOTES ---'          || char(10) ||"
+        "coalesce(nullif(reviewer_notes,''),'(none)')  || char(10) ||"
+        "char(10) || '--- CHANGELOG ---'               || char(10) ||"
+        "coalesce(nullif(changelog,''),'(none)')"
+        " FROM ticket WHERE tkt_uuid LIKE '%s%%';\n",
+        ticket_id);
+    fclose(f);
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "fossil sqlite -R %s < %s 2>/dev/null",
+             global_repo_path, tmp_sql);
+
+    FILE *fp = popen(cmd, "r");
+    unlink(tmp_sql);
+    if (!fp) return 0;
+
+    size_t total = fread(buffer, 1, max_size - 1, fp);
+    buffer[total] = '\0';
+    pclose(fp);
+    return (int)total;
+}
+
 int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_size) {
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 

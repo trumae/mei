@@ -345,34 +345,71 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     char dep_ctx[MEI_TEXT_BUFFER_SIZE]       = {0};
                     for (int t2 = 0; t2 < tkt_count; t2++) {
                         if (strstr(tickets[t2].comment, parent_tag)) {
-                            char sub[256];
-                            snprintf(sub, sizeof(sub), "  [sub] %s: %s (status: %s)\n",
+                            char sub[768];
+                            snprintf(sub, sizeof(sub),
+                                     "  [sub] %s | %s | status: %s\n"
+                                     "        desc: %.500s\n",
                                      tickets[t2].tkt_uuid, tickets[t2].title,
-                                     tickets[t2].status);
+                                     tickets[t2].status, tickets[t2].comment);
                             strncat(subtasks_ctx, sub,
                                     sizeof(subtasks_ctx) - strlen(subtasks_ctx) - 1);
                         }
                         char dep_tag[72];
                         snprintf(dep_tag, sizeof(dep_tag), "[depends:%s]", a->current_ticket);
                         if (strstr(tickets[t2].comment, dep_tag)) {
-                            char dep[MEI_TEXT_BUFFER_SIZE];
-                            snprintf(dep, sizeof(dep), "  [dep] %s: %s (status: %s)\n",
+                            char dep[768];
+                            snprintf(dep, sizeof(dep),
+                                     "  [dep] %s | %s | status: %s\n"
+                                     "        desc: %.500s\n",
                                      tickets[t2].tkt_uuid, tickets[t2].title,
-                                     tickets[t2].status);
+                                     tickets[t2].status, tickets[t2].comment);
                             strncat(dep_ctx, dep, sizeof(dep_ctx) - strlen(dep_ctx) - 1);
                         }
                     }
 
-                    // Truncate ticket description to leave room for instructions.
-                    char desc_short[MEI_TEXT_BUFFER_SIZE];
-                    strncpy(desc_short, tkt_info.comment, sizeof(desc_short) - 1);
-                    desc_short[sizeof(desc_short) - 1] = '\0';
+                    // Full ticket details (all fields) via SQLite — always richer than
+                    // the single comment field available in the in-memory snapshot.
+                    char tkt_full[4096] = {0};
+                    fossil_ticket_show_full(a->current_ticket, tkt_full, sizeof(tkt_full));
+                    if (!tkt_full[0]) {
+                        snprintf(tkt_full, sizeof(tkt_full),
+                                 "uuid:     %s\ntitle:    %s\nstatus:   %s\nassignee: %s\n\n"
+                                 "--- DESCRIPTION ---\n%s\n--- REVIEWER NOTES ---\n%s",
+                                 tkt_info.tkt_uuid, tkt_info.title, tkt_info.status,
+                                 tkt_info.assignee,
+                                 tkt_info.comment[0]        ? tkt_info.comment        : "(no description)",
+                                 tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none)");
+                    }
 
                     // Read accumulated discussion history from the ticket's wiki page.
                     // The orchestrator writes to this page on every status transition, so it
                     // contains a chronological log of all agent actions and reviewer rejections.
                     char discussion_log[4096] = {0};
                     fossil_ticket_read_wiki_log(a->current_ticket, discussion_log, sizeof(discussion_log));
+
+                    // Parent ticket context: when this is a sub-ticket ([parent:UUID] in comment),
+                    // fetch the parent's full details and planning wiki so agents understand the
+                    // broader goal they are contributing to.
+                    char parent_uuid[72] = {0};
+                    const char *pp = strstr(tkt_info.comment, "[parent:");
+                    if (pp) {
+                        const char *start = pp + 8;
+                        const char *end   = strchr(start, ']');
+                        if (end && (size_t)(end - start) < sizeof(parent_uuid) - 1)
+                            strncpy(parent_uuid, start, end - start);
+                    }
+                    char parent_ctx[4096] = {0};
+                    if (parent_uuid[0]) {
+                        char parent_full[2048] = {0};
+                        char parent_wiki[2048] = {0};
+                        fossil_ticket_show_full(parent_uuid, parent_full, sizeof(parent_full));
+                        fossil_ticket_read_wiki_log(parent_uuid, parent_wiki, sizeof(parent_wiki));
+                        snprintf(parent_ctx, sizeof(parent_ctx),
+                                 "--- PARENT TICKET ---\n%s\n"
+                                 "--- PARENT PLANNING NOTES (wiki) ---\n%s\n",
+                                 parent_full[0] ? parent_full : "(could not read parent ticket)",
+                                 parent_wiki[0] ? parent_wiki : "(no wiki yet)");
+                    }
 
                     // Wiki page name for this ticket (first 10 chars, same as fossil_wiki_append_log).
                     // Agents must write their reasoning here as a mandatory workflow step.
@@ -463,15 +500,17 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
                                  "=== TICKET ===\n"
-                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "%s\n\n"
                                  "=== DISCUSSION HISTORY ===\n%s\n\n"
+                                 "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== AVAILABLE AGENTS ===\n%s\n"
                                  "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
                                  "=== YOUR TASK (PLANNER) ===\n"
                                  "%s",
                                  persona_section,
-                                 a->current_ticket, tkt_info.title, desc_short,
+                                 tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history yet)\n",
+                                 parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
                                  agent_roster,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
                                  planner_task);
@@ -483,8 +522,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
                                  "=== TICKET ===\n"
-                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "%s\n\n"
                                  "=== DISCUSSION HISTORY (all past agent activity on this ticket) ===\n%s\n\n"
+                                 "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== LATEST REVIEWER FEEDBACK ===\n%s\n\n"
                                  "=== RELATED SUB-TICKETS ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
@@ -519,8 +559,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
                                  persona_section,
-                                 a->current_ticket, tkt_info.title, desc_short,
+                                 tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
+                                 parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
                                  tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none - first attempt)",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
@@ -536,8 +577,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
                                  "=== TICKET ===\n"
-                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "%s\n\n"
                                  "=== DISCUSSION HISTORY (all prior review cycles on this ticket) ===\n%s\n\n"
+                                 "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== SUB-TICKETS ===\n%s\n"
                                  "=== YOUR TASK (REVIEWER) — BE STRICT ===\n"
                                  "1. READ the discussion history above — if there were prior rejections, verify\n"
@@ -576,8 +618,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "Coder hash (for rework): %s\n"
                                  "REMEMBER: approving bad code harms the project. When in doubt, reject.",
                                  persona_section,
-                                 a->current_ticket, tkt_info.title, desc_short,
+                                 tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first review)\n",
+                                 parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  branch_name,
                                  wiki_page, wiki_cmd,
@@ -593,8 +636,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
                                  "=== TICKET ===\n"
-                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "%s\n\n"
                                  "=== DISCUSSION HISTORY ===\n%s\n\n"
+                                 "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
                                  "=== YOUR TASK (RESEARCHER) ===\n"
                                  "1. READ the ticket description and discussion history carefully.\n"
@@ -623,8 +667,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
                                  persona_section,
-                                 a->current_ticket, tkt_info.title, desc_short,
+                                 tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
+                                 parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
                                  branch_name, branch_name,
                                  a->current_ticket, tkt_info.title,
