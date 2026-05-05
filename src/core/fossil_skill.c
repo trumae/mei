@@ -254,8 +254,8 @@ bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char
     // system() used directly so our >/dev/null redirects are not broken by run_cmd's suffix.
     char commit_cmd[1024];
     snprintf(commit_cmd, sizeof(commit_cmd),
-             "fossil wiki commit \"%s\" %s -R %s >/dev/null 2>&1 "
-             "|| fossil wiki create \"%s\" %s -R %s >/dev/null 2>&1",
+             "fossil wiki commit \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1 "
+             "|| fossil wiki create \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1",
              page_name, tmp_path, global_repo_path,
              page_name, tmp_path, global_repo_path);
     system(commit_cmd);

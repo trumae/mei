@@ -374,7 +374,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "     TMP=$(mktemp ./.mei_wiki_XXXXXX)\n"
                              "     fossil wiki export \"%s\" \"$TMP\" 2>/dev/null || true\n"
                              "     # Append your entry to $TMP (echo, printf, or redirect a file)\n"
-                             "     fossil wiki commit \"%s\" \"$TMP\" || fossil wiki create \"%s\" \"$TMP\"\n"
+                             "     fossil wiki commit \"%s\" \"$TMP\" --mimetype text/x-markdown \\\n"
+                             "       || fossil wiki create \"%s\" \"$TMP\" --mimetype text/x-markdown\n"
                              "     rm -f \"$TMP\"",
                              wiki_page, wiki_page, wiki_page);
 
