@@ -155,7 +155,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 } else if (strcmp(a->role, "reviewer") == 0) {
                     role_accepts = is_delegated && tkt_review;
                 } else {
-                    role_accepts = is_unassigned && tkt_open;
+                    // Researcher/catch-all: picks up unassigned Open tickets (original
+                    // catch-all) AND Planned/Rework tickets explicitly delegated to it
+                    // by the planner — symmetric with the coder routing.
+                    role_accepts = (is_unassigned && tkt_open) ||
+                                   (is_delegated && (tkt_planned || tkt_rework));
                 }
                 // Restart recovery: any agent resumes its own in-progress ticket.
                 int is_recovery = is_delegated && tkt_progress;
@@ -399,29 +403,36 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     } else {
                         snprintf(planner_task, sizeof(planner_task),
                                  "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
-                                 "2. For EACH sub-task create a sub-ticket in your workspace checkout:\n"
+                                 "   For each sub-task, choose the most appropriate agent from\n"
+                                 "   AVAILABLE AGENTS above based on their role and capabilities:\n"
+                                 "   - coder     → implementation, coding, building software\n"
+                                 "   - researcher → market research, data gathering, analysis,\n"
+                                 "                  documentation, external API investigation\n"
+                                 "   Do NOT assign every sub-task to the coder. Research and\n"
+                                 "   analysis tasks MUST go to the researcher.\n"
+                                 "2. For EACH sub-task create a sub-ticket, using the chosen agent's hash:\n"
                                  "     fossil ticket add title \"<sub-task title>\" \\\n"
                                  "       comment \"[parent:%s] <sub-task description>\" \\\n"
                                  "       status \"Planned\" \\\n"
-                                 "       private_contact \"%s\"\n"
-                                 "   The private_contact must be the hash of the coder listed above.\n"
+                                 "       private_contact \"<hash of the right agent for this task>\"\n"
+                                 "   Use exact hashes from the AVAILABLE AGENTS list above.\n"
                                  "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
                                  "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
-                                 "   MANDATORY so coders and reviewers understand your thinking:\n"
+                                 "   MANDATORY so agents understand your thinking:\n"
                                  "%s\n"
                                  "   Write a markdown section with:\n"
                                  "   - Why you chose this decomposition (reasoning, not just a list)\n"
+                                 "   - Which agent handles each sub-task and why that agent was chosen\n"
                                  "   - Key technical risks and open questions you identified\n"
                                  "   - Dependencies between sub-tasks and suggested execution order\n"
                                  "   - Success criteria: what each sub-task must deliver to be done\n"
                                  "   - Any assumptions you made about the requirements\n"
                                  "5. After documenting, close planning on the parent:\n"
                                  "     fossil ticket set %s status \"Planned\"\n"
-                                 "     fossil ticket set %s private_contact \"%s\"\n"
-                                 "Coder hash: %s",
-                                 a->current_ticket, coder_hash,
+                                 "     fossil ticket set %s private_contact \"%s\"\n",
+                                 a->current_ticket,
                                  wiki_page, wiki_cmd,
-                                 a->current_ticket, a->current_ticket, coder_hash, coder_hash);
+                                 a->current_ticket, a->current_ticket, coder_hash);
                     }
 
                     PulseMessage pmsg;
@@ -550,12 +561,48 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strcpy(pmsg.next_action,
                                "Read all changes, build/run code, verify every requirement — merge only if fully satisfied, otherwise Rework");
                     } else {
-                        strcpy(pmsg.intent, "Start Ticket");
+                        strcpy(pmsg.intent, "Research, Analyze, and Document Findings");
                         snprintf(pmsg.context, sizeof(pmsg.context),
-                                 "Ticket %s: %s\nDescription: %s",
-                                 a->current_ticket, tkt_info.title, desc_short);
-                        strcpy(pmsg.current_state, "New");
-                        strcpy(pmsg.next_action, "Read repository, plan and execute the task");
+                                 "=== TICKET ===\n"
+                                 "UUID: %s\nTitle: %s\nDescription:\n%s\n\n"
+                                 "=== DISCUSSION HISTORY ===\n%s\n\n"
+                                 "=== DEPENDENCY CONTEXT ===\n%s\n"
+                                 "=== YOUR TASK (RESEARCHER) ===\n"
+                                 "1. READ the ticket description and discussion history carefully.\n"
+                                 "   Understand exactly what deliverables are required.\n"
+                                 "2. RESEARCH thoroughly — use all available tools:\n"
+                                 "   - Read files in the repository (fossil update trunk first)\n"
+                                 "   - Search documentation, run commands, inspect data\n"
+                                 "   - Gather ALL information the ticket asks for\n"
+                                 "3. PRODUCE the required deliverables as files in your workspace:\n"
+                                 "   - Write markdown documents, Python scripts, data files as needed\n"
+                                 "   - Every deliverable must be non-trivial and complete\n"
+                                 "   - Use meaningful names derived from the ticket title\n"
+                                 "4. COMMIT your deliverables:\n"
+                                 "     fossil branch new %s trunk\n"
+                                 "     fossil update %s\n"
+                                 "     fossil commit -m \"Research %s: %s\"\n"
+                                 "5. DOCUMENT your findings in the ticket wiki page \"%s\" — MANDATORY:\n"
+                                 "%s\n"
+                                 "   Write a markdown section with:\n"
+                                 "   - Summary of what was researched and key findings\n"
+                                 "   - Every source consulted and what was learned from each\n"
+                                 "   - Files produced: name, purpose, and key contents\n"
+                                 "   - Open questions or limitations in the findings\n"
+                                 "6. Submit for review AFTER documenting:\n"
+                                 "     fossil ticket set %s status \"Review\"\n"
+                                 "     fossil ticket set %s private_contact \"%s\"\n"
+                                 "Reviewer hash: %s",
+                                 a->current_ticket, tkt_info.title, desc_short,
+                                 discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
+                                 dep_ctx[0] ? dep_ctx : "  (none)\n",
+                                 branch_name, branch_name,
+                                 a->current_ticket, tkt_info.title,
+                                 wiki_page, wiki_cmd,
+                                 a->current_ticket, a->current_ticket, reviewer_hash, reviewer_hash);
+                        strcpy(pmsg.current_state, "Researching");
+                        strcpy(pmsg.next_action,
+                               "Research thoroughly, produce deliverable files, commit, document in wiki, then set ticket to Review");
                     }
 
                     char payload[MEI_TEXT_BUFFER_SIZE + 512];
