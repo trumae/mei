@@ -388,6 +388,37 @@ bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char
              page_name, tmp_path, global_repo_path);
     system(export_cmd);
 
+    // Normalize literal \n sequences written by agents into real newlines.
+    // Agents sometimes produce escaped output (e.g. echo "line1\nline2") when
+    // writing wiki content, which appears verbatim in the Fossil web UI.
+    {
+        char norm_path[64] = "/tmp/mei_wiki_norm_XXXXXX";
+        int nfd = mkstemp(norm_path);
+        if (nfd >= 0) {
+            FILE *rf = fopen(tmp_path, "r");
+            FILE *wf = fdopen(nfd, "w");
+            if (rf && wf) {
+                int c;
+                while ((c = fgetc(rf)) != EOF) {
+                    if (c == '\\') {
+                        int nx = fgetc(rf);
+                        if (nx == 'n')       fputc('\n', wf);
+                        else if (nx == 't')  fputc('\t', wf);
+                        else { fputc(c, wf); if (nx != EOF) fputc(nx, wf); }
+                    } else {
+                        fputc(c, wf);
+                    }
+                }
+                fclose(rf); fclose(wf);
+                rename(norm_path, tmp_path);
+            } else {
+                if (rf) fclose(rf);
+                if (wf) fclose(wf); else if (nfd >= 0) close(nfd);
+                unlink(norm_path);
+            }
+        }
+    }
+
     // Append the new timestamped entry (Fossil wiki / Markdown bold syntax)
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
