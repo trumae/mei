@@ -190,6 +190,74 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
     return run_cmd(cmd);
 }
 
+// Read the icomment field from the ticket creation artifact.
+// Fossil web UI stores the initial description as "J icomment VALUE" in the artifact,
+// not in the ticket table's comment column. This function extracts it directly.
+static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
+                                                      char *buffer, size_t max_size) {
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+
+    // Find the creation artifact hash: earliest 't'-type event for this ticket UUID.
+    char tmp_sql[64] = "/tmp/mei_ic_sql_XXXXXX";
+    int fd = mkstemp(tmp_sql);
+    if (fd < 0) return 0;
+
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp_sql); return 0; }
+    fprintf(f,
+            ".mode list\n"
+            "SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
+            "WHERE e.type='t' AND e.comment LIKE '%%%s%%' "
+            "ORDER BY e.mtime ASC LIMIT 1;\n",
+            ticket_id);
+    fclose(f);
+
+    char get_hash_cmd[256];
+    snprintf(get_hash_cmd, sizeof(get_hash_cmd),
+             "fossil sqlite -R %s < %s 2>/dev/null", global_repo_path, tmp_sql);
+
+    FILE *fp = popen(get_hash_cmd, "r");
+    unlink(tmp_sql);
+    if (!fp) return 0;
+
+    char artifact_hash[128] = {0};
+    if (fgets(artifact_hash, sizeof(artifact_hash), fp))
+        artifact_hash[strcspn(artifact_hash, "\n\r")] = 0;
+    pclose(fp);
+
+    if (!artifact_hash[0]) return 0;
+
+    // Read the artifact and parse the "J icomment VALUE" line.
+    // Fossil encodes spaces as \s in artifact field values.
+    char art_cmd[256];
+    snprintf(art_cmd, sizeof(art_cmd),
+             "fossil artifact %s -R %s 2>/dev/null", artifact_hash, global_repo_path);
+
+    FILE *art_fp = popen(art_cmd, "r");
+    if (!art_fp) return 0;
+
+    int found = 0;
+    char line[MEI_TEXT_BUFFER_SIZE];
+    while (fgets(line, sizeof(line), art_fp)) {
+        if (strncmp(line, "J icomment ", 11) != 0) continue;
+        const char *src = line + 11;
+        size_t out = 0;
+        while (*src && *src != '\n' && out < max_size - 1) {
+            if (src[0] == '\\' && src[1] == 's') {
+                buffer[out++] = ' ';
+                src += 2;
+            } else {
+                buffer[out++] = *src++;
+            }
+        }
+        buffer[out] = '\0';
+        found = (int)out;
+        break;
+    }
+    pclose(art_fp);
+    return found;
+}
+
 int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size) {
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 
@@ -213,7 +281,7 @@ int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size
         "'severity: ' || coalesce(severity,'')         || char(10) ||"
         "'assignee: ' || coalesce(private_contact,'')  || char(10) ||"
         "char(10) || '--- DESCRIPTION ---'             || char(10) ||"
-        "coalesce(nullif(comment,''),'(no description provided)') || char(10) ||"
+        "coalesce(nullif(comment,''), '(no description provided)') || char(10) ||"
         "char(10) || '--- REVIEWER NOTES ---'          || char(10) ||"
         "coalesce(nullif(reviewer_notes,''),'(none)')  || char(10) ||"
         "char(10) || '--- CHANGELOG ---'               || char(10) ||"
@@ -234,6 +302,28 @@ int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size
     size_t total = fread(buffer, 1, max_size - 1, fp);
     buffer[total] = '\0';
     pclose(fp);
+
+    // If comment is empty in the ticket table, the web-UI description may be stored
+    // in the creation artifact as "J icomment". Read it from the artifact and splice
+    // it in place of the sentinel string.
+    char *sentinel = strstr(buffer, "(no description provided)");
+    if (sentinel) {
+        char icomment[MEI_TEXT_BUFFER_SIZE] = {0};
+        if (fossil_ticket_read_icomment_from_artifact(ticket_id, icomment, sizeof(icomment)) > 0) {
+            // Replace sentinel with the real icomment, adjusting total length.
+            size_t before   = (size_t)(sentinel - buffer);
+            size_t sentinel_len = strlen("(no description provided)");
+            size_t ic_len   = strlen(icomment);
+            size_t after    = total - before - sentinel_len;
+            // Only splice if it fits within max_size.
+            if (before + ic_len + after < max_size - 1) {
+                memmove(sentinel + ic_len, sentinel + sentinel_len, after + 1);
+                memcpy(sentinel, icomment, ic_len);
+                total = before + ic_len + after;
+            }
+        }
+    }
+
     return (int)total;
 }
 
