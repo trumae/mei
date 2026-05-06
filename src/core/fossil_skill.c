@@ -203,14 +203,15 @@ int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
     char uuid10[11] = {0};
     strncpy(uuid10, ticket_id, 10);
 
+    // Use SQL as a CLI arg to fossil sqlite — avoids both the stdin/ncurses
+    // interference issue and shell printf interpreting % in LIKE patterns.
     char get_hash_cmd[512];
     snprintf(get_hash_cmd, sizeof(get_hash_cmd),
-             "printf \".mode list\\n"
-             "SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
+             "fossil sqlite -R %s "
+             "\"SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
              "WHERE e.type='t' AND e.comment LIKE ('%%%s%%') "
-             "ORDER BY e.mtime ASC LIMIT 1;\\n\" "
-             "| fossil sqlite -R %s 2>/dev/null",
-             uuid10, global_repo_path);
+             "ORDER BY e.mtime ASC LIMIT 1;\" 2>/dev/null",
+             global_repo_path, uuid10);
 
     FILE *fp = popen(get_hash_cmd, "r");
     if (!fp) return 0;
