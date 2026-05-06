@@ -367,29 +367,32 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         }
                     }
 
-                    // Full ticket details (all fields) via SQLite — always richer than
-                    // the single comment field available in the in-memory snapshot.
-                    char tkt_full[4096] = {0};
-                    fossil_ticket_show_full(a->current_ticket, tkt_full, sizeof(tkt_full));
-                    if (!tkt_full[0]) {
-                        snprintf(tkt_full, sizeof(tkt_full),
-                                 "uuid:     %s\ntitle:    %s\nstatus:   %s\nassignee: %s\n\n"
-                                 "--- DESCRIPTION ---\n%s\n--- REVIEWER NOTES ---\n%s",
-                                 tkt_info.tkt_uuid, tkt_info.title, tkt_info.status,
-                                 tkt_info.assignee,
-                                 tkt_info.comment[0]        ? tkt_info.comment        : "(no description)",
-                                 tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none)");
+                    // Get the ticket description. Agent-created tickets use the comment
+                    // field; web-UI tickets store it as icomment in the creation artifact.
+                    char tkt_description[2048] = {0};
+                    if (tkt_info.comment[0]) {
+                        strncpy(tkt_description, tkt_info.comment, sizeof(tkt_description) - 1);
+                    } else {
+                        fossil_ticket_read_icomment_from_artifact(
+                            a->current_ticket, tkt_description, sizeof(tkt_description));
                     }
 
+                    char tkt_full[4096];
+                    snprintf(tkt_full, sizeof(tkt_full),
+                             "uuid:     %s\ntitle:    %s\nstatus:   %s\nassignee: %s\n\n"
+                             "--- DESCRIPTION ---\n%s\n\n"
+                             "--- REVIEWER NOTES ---\n%s",
+                             tkt_info.tkt_uuid, tkt_info.title, tkt_info.status,
+                             tkt_info.assignee,
+                             tkt_description[0] ? tkt_description : "(no description in ticket)",
+                             tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none)");
+
                     // Read accumulated discussion history from the ticket's wiki page.
-                    // The orchestrator writes to this page on every status transition, so it
-                    // contains a chronological log of all agent actions and reviewer rejections.
                     char discussion_log[4096] = {0};
                     fossil_ticket_read_wiki_log(a->current_ticket, discussion_log, sizeof(discussion_log));
 
                     // Parent ticket context: when this is a sub-ticket ([parent:UUID] in comment),
-                    // fetch the parent's full details and planning wiki so agents understand the
-                    // broader goal they are contributing to.
+                    // include the parent's full description and planning wiki.
                     char parent_uuid[72] = {0};
                     const char *pp = strstr(tkt_info.comment, "[parent:");
                     if (pp) {
@@ -400,14 +403,33 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     }
                     char parent_ctx[4096] = {0};
                     if (parent_uuid[0]) {
-                        char parent_full[2048] = {0};
+                        // Find parent in the already-loaded tickets array
+                        FossilTicket *parent_tkt = NULL;
+                        for (int t2 = 0; t2 < tkt_count; t2++) {
+                            if (strncmp(tickets[t2].tkt_uuid, parent_uuid,
+                                        strlen(parent_uuid)) == 0) {
+                                parent_tkt = &tickets[t2];
+                                break;
+                            }
+                        }
+                        char parent_desc[2048] = {0};
+                        if (parent_tkt && parent_tkt->comment[0]) {
+                            strncpy(parent_desc, parent_tkt->comment, sizeof(parent_desc) - 1);
+                        } else {
+                            fossil_ticket_read_icomment_from_artifact(
+                                parent_uuid, parent_desc, sizeof(parent_desc));
+                        }
                         char parent_wiki[2048] = {0};
-                        fossil_ticket_show_full(parent_uuid, parent_full, sizeof(parent_full));
                         fossil_ticket_read_wiki_log(parent_uuid, parent_wiki, sizeof(parent_wiki));
                         snprintf(parent_ctx, sizeof(parent_ctx),
-                                 "--- PARENT TICKET ---\n%s\n"
+                                 "--- PARENT TICKET ---\n"
+                                 "uuid:  %s\ntitle: %s\nstatus: %s\n\n"
+                                 "--- DESCRIPTION ---\n%s\n\n"
                                  "--- PARENT PLANNING NOTES (wiki) ---\n%s\n",
-                                 parent_full[0] ? parent_full : "(could not read parent ticket)",
+                                 parent_uuid,
+                                 parent_tkt ? parent_tkt->title  : "(unknown)",
+                                 parent_tkt ? parent_tkt->status : "(unknown)",
+                                 parent_desc[0] ? parent_desc : "(no description)",
                                  parent_wiki[0] ? parent_wiki : "(no wiki yet)");
                     }
 

@@ -193,8 +193,8 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
 // Read the icomment field from the ticket creation artifact.
 // Fossil web UI stores the initial description as "J icomment VALUE" in the artifact,
 // not in the ticket table's comment column. This function extracts it directly.
-static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
-                                                      char *buffer, size_t max_size) {
+int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
+                                               char *buffer, size_t max_size) {
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 
     // Find the creation artifact hash: earliest 't'-type event for this ticket UUID.
@@ -203,26 +203,16 @@ static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
     char uuid10[11] = {0};
     strncpy(uuid10, ticket_id, 10);
 
-    char tmp_sql[64] = "/tmp/mei_ic_sql_XXXXXX";
-    int fd = mkstemp(tmp_sql);
-    if (fd < 0) return 0;
-
-    FILE *f = fdopen(fd, "w");
-    if (!f) { close(fd); unlink(tmp_sql); return 0; }
-    fprintf(f,
-            ".mode list\n"
-            "SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
-            "WHERE e.type='t' AND e.comment LIKE '%%%s%%' "
-            "ORDER BY e.mtime ASC LIMIT 1;\n",
-            uuid10);
-    fclose(f);
-
-    char get_hash_cmd[256];
+    char get_hash_cmd[512];
     snprintf(get_hash_cmd, sizeof(get_hash_cmd),
-             "fossil sqlite -R %s < %s 2>/dev/null", global_repo_path, tmp_sql);
+             "printf \".mode list\\n"
+             "SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
+             "WHERE e.type='t' AND e.comment LIKE ('%%%s%%') "
+             "ORDER BY e.mtime ASC LIMIT 1;\\n\" "
+             "| fossil sqlite -R %s 2>/dev/null",
+             uuid10, global_repo_path);
 
     FILE *fp = popen(get_hash_cmd, "r");
-    unlink(tmp_sql);
     if (!fp) return 0;
 
     char artifact_hash[128] = {0};
@@ -266,11 +256,15 @@ static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
 int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size) {
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 
-    // Write the SQL query to a temp file to avoid shell-escaping issues with
-    // the ticket UUID being embedded in a popen() command string.
+    FILE *dbg = fopen("/tmp/mei_tkt_debug.log", "a");
+
+    // Step 1: write SQL to temp file
     char tmp_sql[64] = "/tmp/mei_tkt_sql_XXXXXX";
     int fd = mkstemp(tmp_sql);
-    if (fd < 0) return 0;
+    if (fd < 0) {
+        if (dbg) { fprintf(dbg, "[show_full] mkstemp failed for %s\n", ticket_id); fclose(dbg); }
+        return 0;
+    }
 
     FILE *f = fdopen(fd, "w");
     if (!f) { close(fd); unlink(tmp_sql); return 0; }
@@ -295,40 +289,52 @@ int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size
         ticket_id);
     fclose(f);
 
-    char cmd[256];
+    // Step 2: run fossil sqlite
+    char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "fossil sqlite -R %s < %s 2>/dev/null",
+             "fossil sqlite -R %s < %s 2>/tmp/mei_tkt_sql_err.log",
              global_repo_path, tmp_sql);
+
+    if (dbg) fprintf(dbg, "[show_full] cmd: %s\n", cmd);
 
     FILE *fp = popen(cmd, "r");
     unlink(tmp_sql);
-    if (!fp) return 0;
+    if (!fp) {
+        if (dbg) { fprintf(dbg, "[show_full] popen failed\n"); fclose(dbg); }
+        return 0;
+    }
 
     size_t total = fread(buffer, 1, max_size - 1, fp);
     buffer[total] = '\0';
     pclose(fp);
 
-    // If comment is empty in the ticket table, the web-UI description may be stored
-    // in the creation artifact as "J icomment". Read it from the artifact and splice
-    // it in place of the sentinel string.
+    if (dbg) fprintf(dbg, "[show_full] SQL returned %zu bytes for ticket %.10s\n", total, ticket_id);
+
+    // Step 3: if comment is empty, splice icomment from creation artifact
     char *sentinel = strstr(buffer, "(no description provided)");
+    if (dbg) fprintf(dbg, "[show_full] sentinel found: %s\n", sentinel ? "YES" : "NO");
+
     if (sentinel) {
-        char icomment[MEI_TEXT_BUFFER_SIZE] = {0};
-        if (fossil_ticket_read_icomment_from_artifact(ticket_id, icomment, sizeof(icomment)) > 0) {
-            // Replace sentinel with the real icomment, adjusting total length.
-            size_t before   = (size_t)(sentinel - buffer);
+        char icomment[4096] = {0};
+        int ic_len = fossil_ticket_read_icomment_from_artifact(ticket_id, icomment, sizeof(icomment));
+        if (dbg) fprintf(dbg, "[show_full] icomment read: %d bytes: %.80s\n", ic_len, icomment);
+
+        if (ic_len > 0) {
+            size_t before       = (size_t)(sentinel - buffer);
             size_t sentinel_len = strlen("(no description provided)");
-            size_t ic_len   = strlen(icomment);
-            size_t after    = total - before - sentinel_len;
-            // Only splice if it fits within max_size.
-            if (before + ic_len + after < max_size - 1) {
+            size_t after        = total - before - sentinel_len;
+            if (before + (size_t)ic_len + after < max_size - 1) {
                 memmove(sentinel + ic_len, sentinel + sentinel_len, after + 1);
                 memcpy(sentinel, icomment, ic_len);
-                total = before + ic_len + after;
+                total = before + (size_t)ic_len + after;
+                if (dbg) fprintf(dbg, "[show_full] splice OK, new total=%zu\n", total);
+            } else {
+                if (dbg) fprintf(dbg, "[show_full] splice skipped: would overflow\n");
             }
         }
     }
 
+    if (dbg) fclose(dbg);
     return (int)total;
 }
 
