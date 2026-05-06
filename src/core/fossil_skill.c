@@ -198,6 +198,11 @@ static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 
     // Find the creation artifact hash: earliest 't'-type event for this ticket UUID.
+    // Fossil truncates the UUID to 10 chars in event.comment (e.g. "7aa828bb74"),
+    // so LIKE with the full 40-char UUID would never match.
+    char uuid10[11] = {0};
+    strncpy(uuid10, ticket_id, 10);
+
     char tmp_sql[64] = "/tmp/mei_ic_sql_XXXXXX";
     int fd = mkstemp(tmp_sql);
     if (fd < 0) return 0;
@@ -209,7 +214,7 @@ static int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
             "SELECT b.uuid FROM event e JOIN blob b ON b.rid=e.objid "
             "WHERE e.type='t' AND e.comment LIKE '%%%s%%' "
             "ORDER BY e.mtime ASC LIMIT 1;\n",
-            ticket_id);
+            uuid10);
     fclose(f);
 
     char get_hash_cmd[256];
