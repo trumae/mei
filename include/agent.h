@@ -22,7 +22,8 @@ typedef struct {
     char description[MEI_TEXT_BUFFER_SIZE];
     char capabilities[256];
     AgentState state;
-    int last_heartbeat; // simulated seconds ago
+    int last_heartbeat;
+    int step_count;
     char current_ticket[64];
 } Agent;
 
