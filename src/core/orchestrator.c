@@ -110,7 +110,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
     for (int i = 0; i < agent_count; i++) {
         Agent *a = &agents[i];
-        
+        a->step_count = (ticket_steps[i] > 0) ? ticket_steps[i] : 0;
+
         if (a->state == AGENT_STATE_OPEN) {
             // Role-based ticket routing:
             //   planner  → picks up Open unassigned tickets
@@ -484,6 +485,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "       status \"Planned\" \\\n"
                                  "       private_contact \"<full hash from AVAILABLE AGENTS>\"\n"
                                  "   Copy the full hash exactly as shown in the AVAILABLE AGENTS list.\n"
+                                 "   !! YOUR OWN HASH IS %s — NEVER assign any sub-ticket to yourself.\n"
+                                 "   !! You are the coordinator. Executors are: coder, researcher, reviewer.\n"
                                  "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
                                  "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
                                  "   MANDATORY so agents understand your thinking:\n"
@@ -500,7 +503,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   The parent's job is to produce the sub-tickets. Once that is done,\n"
                                  "   it must be closed. Do NOT assign it to any agent for implementation.\n"
                                  "   All remaining work lives in the sub-tickets.\n",
-                                 a->current_ticket,
+                                 a->current_ticket, a->hash,
                                  wiki_page, wiki_cmd,
                                  a->current_ticket);
                     }
@@ -538,7 +541,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  planner_task);
                         strcpy(pmsg.current_state, "Planning");
                         strcpy(pmsg.next_action,
-                               "Decompose into sub-tickets, create each with fossil ticket add, then delegate parent to coder");
+                               "Decompose into sub-tickets assigned to executor agents (never yourself), document in wiki, mark parent Done");
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
                         snprintf(pmsg.context, sizeof(pmsg.context),

@@ -62,16 +62,18 @@ int main(int argc, char *argv[]) {
     int agent_count = 0;
 
     init_ui();
+    draw_splash(NULL);
     signal(SIGINT, handle_sigint);
 
     char init_msg[512];
     snprintf(init_msg, sizeof(init_msg), "System initializing... Target Repo: %s", repo_path);
     log_message(init_msg);
-    
+
     orchestrator_init(agents, &agent_count);
     g_agent_count = agent_count;
-    
+
     log_message("Orchestrator online. Waiting for heartbeat...");
+    ui_set_ready();
 
     int selected_agent = 0;
     // Set non-blocking input for the heartbeat loop matching TICK_INTERVAL_MS
