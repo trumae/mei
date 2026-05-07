@@ -23,7 +23,7 @@ all: dirs $(TARGET)
 
 dirs:
 	@mkdir -p $(BIN_DIR)
-	@mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/ui $(OBJ_DIR)/utils
+	@mkdir -p $(OBJ_DIR)/core $(OBJ_DIR)/ui $(OBJ_DIR)/utils $(OBJ_DIR)/cmd
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
