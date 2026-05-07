@@ -109,7 +109,10 @@
       "Bash(fossil commit *)",
       "Bash(fossil branch *)",
       "Bash(fossil timeline *)",
-      "Bash(grep -v \"^gcc\\\\|^$\")"
+      "Bash(grep -v \"^gcc\\\\|^$\")",
+      "Bash(./bin/orchestrator_ui *)",
+      "Bash(rm -f testproject.fossil)",
+      "Bash(/Users/viniciusmaciel/projs/MEI/bin/orchestrator_ui new *)"
     ]
   }
 }
