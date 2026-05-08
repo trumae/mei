@@ -290,6 +290,17 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 }
 
                 if (cli_ready) {
+                    // Sync workspace with trunk before the agent starts work.
+                    char upd_cmd[512];
+                    snprintf(upd_cmd, sizeof(upd_cmd),
+                             "cd /tmp/workspaces/%s && fossil update trunk >/dev/null 2>&1",
+                             a->name);
+                    system(upd_cmd);
+                    char upd_log[128];
+                    snprintf(upd_log, sizeof(upd_log),
+                             "[sync] Workspace updated for %s before PULSE", a->name);
+                    log_message(upd_log);
+
                     // Fetch ticket info to build PULSE
                     FossilTicket tkt_info;
                     memset(&tkt_info, 0, sizeof(tkt_info));
