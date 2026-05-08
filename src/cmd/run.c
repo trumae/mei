@@ -8,15 +8,42 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <unistd.h>
 #include <ncurses.h>
+#include <pthread.h>
 
-static Agent *g_agents      = NULL;
-static int    g_agent_count = 0;
-static int    g_running     = 1;
+static Agent       *g_agents      = NULL;
+static int          g_agent_count = 0;
+static volatile int g_running     = 1;
+
+pthread_mutex_t g_agents_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void handle_sigint(int sig) {
     (void)sig;
     g_running = 0;
+}
+
+static void *tick_thread_fn(void *arg) {
+    (void)arg;
+    struct timespec last = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &last);
+
+    while (g_running) {
+        usleep(100000); // poll every 100ms without blocking
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed_ms = (now.tv_sec  - last.tv_sec)  * 1000
+                        + (now.tv_nsec - last.tv_nsec) / 1000000;
+
+        if (elapsed_ms >= TICK_INTERVAL_MS) {
+            last = now;
+            pthread_mutex_lock(&g_agents_mutex);
+            orchestrator_tick(g_agents, g_agent_count);
+            pthread_mutex_unlock(&g_agents_mutex);
+        }
+    }
+    return NULL;
 }
 
 int cmd_run(int argc, char *argv[]) {
@@ -67,13 +94,15 @@ int cmd_run(int argc, char *argv[]) {
     ui_set_ready();
 
     int selected_agent = 0;
-    timeout(TICK_INTERVAL_MS);
+    timeout(200); // short timeout so UI refreshes ~5x/s regardless of input
 
-    struct timespec last_tick = {0, 0};
-    clock_gettime(CLOCK_MONOTONIC, &last_tick);
+    pthread_t tick_thread;
+    pthread_create(&tick_thread, NULL, tick_thread_fn, NULL);
 
     while (g_running) {
+        pthread_mutex_lock(&g_agents_mutex);
         draw_main_screen(agents, agent_count, selected_agent);
+        pthread_mutex_unlock(&g_agents_mutex);
 
         int ch = getch();
         switch (ch) {
@@ -109,7 +138,9 @@ int cmd_run(int argc, char *argv[]) {
                 break;
             case 'p': case 'P':
                 if (agent_count > 0) {
+                    pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_PAUSED;
+                    pthread_mutex_unlock(&g_agents_mutex);
                     char log[256];
                     snprintf(log, sizeof(log), "Paused agent: %s", agents[selected_agent].name);
                     log_message(log);
@@ -117,7 +148,9 @@ int cmd_run(int argc, char *argv[]) {
                 break;
             case 'r': case 'R':
                 if (agent_count > 0) {
+                    pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_IN_PROGRESS;
+                    pthread_mutex_unlock(&g_agents_mutex);
                     char log[256];
                     snprintf(log, sizeof(log), "Resumed agent: %s", agents[selected_agent].name);
                     log_message(log);
@@ -125,25 +158,20 @@ int cmd_run(int argc, char *argv[]) {
                 break;
             case 'k': case 'K':
                 if (agent_count > 0) {
+                    pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_OFFLINE;
+                    pthread_mutex_unlock(&g_agents_mutex);
                     char log[256];
                     snprintf(log, sizeof(log), "Killed agent: %s", agents[selected_agent].name);
                     log_message(log);
                 }
                 break;
-            case ERR: {
-                struct timespec now;
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                long elapsed_ms = (now.tv_sec  - last_tick.tv_sec)  * 1000
-                                + (now.tv_nsec - last_tick.tv_nsec) / 1000000;
-                if (elapsed_ms >= TICK_INTERVAL_MS) {
-                    last_tick = now;
-                    orchestrator_tick(agents, agent_count);
-                }
-                break;
-            }
+            case ERR:
+                break; // tick is handled by the background thread
         }
     }
+
+    pthread_join(tick_thread, NULL);
 
     log_message("Shutting down orchestrator...");
     orchestrator_shutdown(agents, agent_count);

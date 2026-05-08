@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c99 -Iinclude -g
-LDFLAGS = -lncurses
+LDFLAGS = -lncurses -lpthread
 
 FOSSIL_HASH := $(shell fossil info 2>/dev/null | grep '^checkout:' | awk '{print substr($$2,1,12)}')
 ifeq ($(FOSSIL_HASH),)
