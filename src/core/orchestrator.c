@@ -211,7 +211,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
             // the orchestrator must return this agent to OPEN so the pipeline continues.
             // Skip during warm-up (ticket_steps == -1) to avoid a false positive right
             // after assignment, before the AI has had a chance to do anything.
-            if (ticket_steps[i] != -1) {
+            if (ticket_steps[i] >= 1) {
                 char final_status[64]   = {0};
                 char final_notes[4096]  = {0};
                 int still_active = 0;

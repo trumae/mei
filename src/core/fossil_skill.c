@@ -113,7 +113,7 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
         char *comment        = fields[4];
         char *reviewer_notes = fields[5];
 
-        if (uuid && strlen(uuid) > 0) {
+        if (uuid && strlen(uuid) >= 10) {
             strncpy(tickets[count].tkt_uuid,        uuid,           sizeof(tickets[count].tkt_uuid) - 1);
             strncpy(tickets[count].title,            title          ? title          : "", sizeof(tickets[count].title) - 1);
             strncpy(tickets[count].status,           status         ? status         : "Open", sizeof(tickets[count].status) - 1);
