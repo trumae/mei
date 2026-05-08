@@ -77,6 +77,7 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
              "printf \".mode list\\n"
+             "PRAGMA busy_timeout = 5000;\\n"
              "SELECT tkt_uuid || '|' || coalesce(title,'') || '|' || "
              "coalesce(status,'') || '|' || coalesce(private_contact,'') || '|' || "
              "coalesce(comment,'') || '|' || coalesce(reviewer_notes,'') "
