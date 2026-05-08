@@ -38,9 +38,7 @@ static void *tick_thread_fn(void *arg) {
 
         if (elapsed_ms >= TICK_INTERVAL_MS) {
             last = now;
-            pthread_mutex_lock(&g_agents_mutex);
             orchestrator_tick(g_agents, g_agent_count);
-            pthread_mutex_unlock(&g_agents_mutex);
         }
     }
     return NULL;
@@ -96,13 +94,16 @@ int cmd_run(int argc, char *argv[]) {
     int selected_agent = 0;
     timeout(200); // short timeout so UI refreshes ~5x/s regardless of input
 
-    pthread_t tick_thread;
-    pthread_create(&tick_thread, NULL, tick_thread_fn, NULL);
+    pthread_t    tick_thread;
+    pthread_attr_t tick_attr;
+    pthread_attr_init(&tick_attr);
+    pthread_attr_setstacksize(&tick_attr, 16 * 1024 * 1024); // 16MB: orchestrator_tick uses ~7MB of stack
+    pthread_attr_setdetachstate(&tick_attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tick_thread, &tick_attr, tick_thread_fn, NULL);
+    pthread_attr_destroy(&tick_attr);
 
     while (g_running) {
-        pthread_mutex_lock(&g_agents_mutex);
         draw_main_screen(agents, agent_count, selected_agent);
-        pthread_mutex_unlock(&g_agents_mutex);
 
         int ch = getch();
         switch (ch) {
@@ -170,8 +171,6 @@ int cmd_run(int argc, char *argv[]) {
                 break; // tick is handled by the background thread
         }
     }
-
-    pthread_join(tick_thread, NULL);
 
     log_message("Shutting down orchestrator...");
     orchestrator_shutdown(agents, agent_count);
