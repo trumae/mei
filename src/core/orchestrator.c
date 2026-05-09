@@ -38,9 +38,13 @@ static unsigned long hash_pane(const char *s, int len) {
 // Idle-nudge: send a follow-up when the pane has been static for NUDGE_IDLE_TICKS
 // consecutive ticks while the ticket is still In Progress. Repeat every NUDGE_REPEAT_TICKS.
 // Completely CLI-agnostic — detects inactivity, not specific strings.
-#define NUDGE_MIN_TICKS      15   // ignore first ~30s (agent may still be generating)
-#define NUDGE_IDLE_TICKS     30   // pane must be static for ~60s before nudging
-#define NUDGE_REPEAT_TICKS   60   // re-nudge every ~120s while still idle
+#define NUDGE_MIN_TICKS         15   // ignore first ~30s (agent may still be generating)
+#define NUDGE_IDLE_TICKS        30   // pane must be static for ~60s before nudging
+#define NUDGE_REPEAT_TICKS      60   // re-nudge every ~120s while still idle
+// Planner uses a much higher idle threshold: planners do multi-step reasoning where
+// the LLM finishes one analytical turn and pauses before executing commands.
+// 150 ticks (~5 min) gives enough room for generation without leaving it stuck forever.
+#define NUDGE_IDLE_TICKS_PLANNER  150  // ~5 min idle before nudging planner
 
 // Check whether all [depends:uuid] tags in a ticket comment point to tickets
 // that are Done. Tickets not found in the active array are assumed Done (they
@@ -939,24 +943,34 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "[perm] Auto-accepted permission dialog for %s", a->name);
                     log_message(perm_log);
                 }
-                // Idle-nudge: pane has been static for NUDGE_IDLE_TICKS while the ticket
-                // is still In Progress — the agent stopped working without completing the
-                // task. CLI-agnostic: detects inactivity, not specific strings.
-                // Planners are exempt: they do long-running LLM generation that can look
-                // idle for minutes before producing output. Nudging them mid-generation
-                // causes them to abandon sub-ticket creation and prematurely close the parent.
-                else if (strcmp(a->role, "planner") != 0 &&
-                         ticket_steps[i] >= NUDGE_MIN_TICKS &&
-                         pane_idle_ticks[i] >= NUDGE_IDLE_TICKS &&
+                // Idle-nudge: pane has been static while the ticket is still In Progress.
+                // Planners use a higher idle threshold (NUDGE_IDLE_TICKS_PLANNER) because
+                // they do multi-step reasoning: first turn produces analysis, then pauses
+                // before executing fossil commands. A short threshold would interrupt
+                // generation and cause premature ticket closure.
+                else if (ticket_steps[i] >= NUDGE_MIN_TICKS &&
+                         pane_idle_ticks[i] >= (strcmp(a->role, "planner") == 0
+                                                ? NUDGE_IDLE_TICKS_PLANNER
+                                                : NUDGE_IDLE_TICKS) &&
                          pane_idle_ticks[i] % NUDGE_REPEAT_TICKS == 0) {
                     char nudge[512];
-                    snprintf(nudge, sizeof(nudge),
-                             "Ticket %s is still In Progress in Fossil — your task is NOT complete.\n"
-                             "Your working directory is a valid Fossil checkout. Execute NOW:\n"
-                             "1. Run all pending fossil commands (commit, branch, ticket set status).\n"
-                             "2. Do NOT ask for confirmation — just execute every step immediately.\n"
-                             "3. The task ends only when the Fossil ticket status has been updated.",
-                             a->current_ticket);
+                    if (strcmp(a->role, "planner") == 0) {
+                        snprintf(nudge, sizeof(nudge),
+                                 "Ticket %s is still In Progress. You have already done your analysis.\n"
+                                 "Now EXECUTE — run the fossil ticket add commands you planned.\n"
+                                 "Do NOT explain further. Run every command now, one by one.\n"
+                                 "The task ends only when all sub-tickets are created and the\n"
+                                 "parent ticket status is set to Done in Fossil.",
+                                 a->current_ticket);
+                    } else {
+                        snprintf(nudge, sizeof(nudge),
+                                 "Ticket %s is still In Progress in Fossil — your task is NOT complete.\n"
+                                 "Your working directory is a valid Fossil checkout. Execute NOW:\n"
+                                 "1. Run all pending fossil commands (commit, branch, ticket set status).\n"
+                                 "2. Do NOT ask for confirmation — just execute every step immediately.\n"
+                                 "3. The task ends only when the Fossil ticket status has been updated.",
+                                 a->current_ticket);
+                    }
                     tmux_send_pulse(a->name, nudge);
                     char nudge_log[256];
                     snprintf(nudge_log, sizeof(nudge_log),
