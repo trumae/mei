@@ -16,6 +16,18 @@ static int warm_up_ticks[MAX_AGENTS] = {0};
 // Set to 1 once the workspace trust dialog has been dismissed for each agent.
 // Persists for the lifetime of the process (trust is remembered by the CLI per workspace).
 static int trust_accepted[MAX_AGENTS] = {0};
+// Pane inactivity tracking: hash of last captured pane content and how many
+// consecutive ticks it has been unchanged. CLI-agnostic idle detection.
+static unsigned long last_pane_hash[MAX_AGENTS] = {0};
+static int pane_idle_ticks[MAX_AGENTS] = {0};
+
+// djb2 hash — fast, no dependencies, good enough for change detection.
+static unsigned long hash_pane(const char *s, int len) {
+    unsigned long h = 5381;
+    for (int i = 0; i < len; i++)
+        h = ((h << 5) + h) ^ (unsigned char)s[i];
+    return h;
+}
 
 // Number of ticks to wait for CLI to warm up if no prompt is detected (safety timeout)
 #define CLI_WARMUP_TIMEOUT_TICKS 15
@@ -23,6 +35,39 @@ static int trust_accepted[MAX_AGENTS] = {0};
 // that have no standard prompt). Must be large enough to let real CLIs finish loading their
 // TUI (opencode takes ~5-8s) so that pane_len > 0 alone is not triggered prematurely.
 #define CLI_WARMUP_MIN_TICKS 5
+// Idle-nudge: send a follow-up when the pane has been static for NUDGE_IDLE_TICKS
+// consecutive ticks while the ticket is still In Progress. Repeat every NUDGE_REPEAT_TICKS.
+// Completely CLI-agnostic — detects inactivity, not specific strings.
+#define NUDGE_MIN_TICKS      15   // ignore first ~30s (agent may still be generating)
+#define NUDGE_IDLE_TICKS     30   // pane must be static for ~60s before nudging
+#define NUDGE_REPEAT_TICKS   60   // re-nudge every ~120s while still idle
+
+// Check whether all [depends:uuid] tags in a ticket comment point to tickets
+// that are Done. Tickets not found in the active array are assumed Done (they
+// were filtered out of the query because they are already closed).
+static int deps_satisfied(FossilTicket *tickets, int tkt_count, const char *comment) {
+    const char *p = comment;
+    while ((p = strstr(p, "[depends:")) != NULL) {
+        p += 9;
+        const char *end = strchr(p, ']');
+        if (!end) break;
+        char dep_uuid[64] = {0};
+        size_t len = (size_t)(end - p);
+        if (len == 0 || len >= sizeof(dep_uuid)) { p = end + 1; continue; }
+        strncpy(dep_uuid, p, len);
+        // Search for the dependency in the active tickets array.
+        for (int t = 0; t < tkt_count; t++) {
+            if (strncmp(tickets[t].tkt_uuid, dep_uuid, len) == 0) {
+                // Found — it is still open. Only satisfied if Done.
+                if (strcasecmp(tickets[t].status, "Done") != 0) return 0;
+                break;
+            }
+        }
+        // Not found in active tickets → Done/Closed (filtered by the SQL query).
+        p = end + 1;
+    }
+    return 1;
+}
 
 void orchestrator_init(Agent *agents, int *agent_count) {
     // Scan /.agents/*.md to populate real agents
@@ -105,7 +150,10 @@ void orchestrator_init(Agent *agents, int *agent_count) {
 
 
 void orchestrator_tick(Agent *agents, int agent_count) {
-    FossilTicket tickets[100];
+    // Large ticket array lives in BSS (static) to avoid blowing the tick thread's
+    // stack. orchestrator_tick is always called from a single thread sequentially,
+    // so static storage is safe.
+    static FossilTicket tickets[100];
     int tkt_count = fossil_ticket_list_parsed(tickets, 100);
 
     for (int i = 0; i < agent_count; i++) {
@@ -141,14 +189,14 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 int tkt_planned  = (strcasecmp(tickets[t].status, "Planned") == 0);
                 int tkt_review   = (strcasecmp(tickets[t].status, "Review") == 0);
                 int tkt_rework   = (strcasecmp(tickets[t].status, "Rework") == 0);
+                int tkt_blocked  = (strcasecmp(tickets[t].status, "Blocked") == 0);
 
                 int role_accepts = 0;
                 if (strcmp(a->role, "planner") == 0) {
-                    // Planner owns Open tickets that are not sub-tasks.
-                    // Sub-tickets (comment contains [parent:...]) were already created by a
-                    // previous planning cycle and belong to a specific agent — don't re-plan them.
+                    // Planner owns Open tickets (not sub-tasks) and any Blocked ticket
+                    // where an executor got stuck and needs a decision.
                     int is_subtask = strstr(tickets[t].comment, "[parent:") != NULL;
-                    role_accepts = tkt_open && !is_subtask;
+                    role_accepts = (tkt_open && !is_subtask) || tkt_blocked;
                 } else if (strcmp(a->role, "coder") == 0) {
                     int is_subtask = (strstr(tickets[t].comment, "[parent:") != NULL);
                     // Also accept re-opened sub-tickets (user manually reset to Open)
@@ -164,6 +212,22 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 }
                 // Restart recovery: any agent resumes its own in-progress ticket.
                 int is_recovery = is_delegated && tkt_progress;
+
+                // Dependency gate: executor agents may not start a ticket until all
+                // [depends:uuid] entries in its comment are Done. Recovery (resuming
+                // an already in-progress ticket) bypasses this — work was already started.
+                if (role_accepts && !is_recovery &&
+                    strcmp(a->role, "planner")  != 0 &&
+                    strcmp(a->role, "reviewer") != 0) {
+                    if (!deps_satisfied(tickets, tkt_count, tickets[t].comment)) {
+                        role_accepts = 0;
+                        char dep_log[256];
+                        snprintf(dep_log, sizeof(dep_log),
+                                 "[dep-gate] %s skipping ticket %.10s — dependency not Done",
+                                 a->name, tickets[t].tkt_uuid);
+                        log_message(dep_log);
+                    }
+                }
 
                 if (!role_accepts && !is_recovery) continue;
 
@@ -193,6 +257,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
                 strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);
                 a->state = AGENT_STATE_IN_PROGRESS;
+                a->resolving_block = tkt_blocked;
                 ticket_steps[i] = -1;
                 warm_up_ticks[i] = 0;
 
@@ -248,6 +313,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     strcpy(a->current_ticket, "None");
                     ticket_steps[i] = 0;
                     warm_up_ticks[i] = 0;
+                    pane_idle_ticks[i] = 0;
+                    last_pane_hash[i] = 0;
                     continue;
                 }
             }
@@ -320,7 +387,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // Point 5: collect next-role hashes AND build agent roster for planner.
                     char coder_hash[128]    = {0};
                     char reviewer_hash[128] = {0};
-                    char agent_roster[MEI_TEXT_BUFFER_SIZE] = {0};
+                    static char agent_roster[MEI_TEXT_BUFFER_SIZE];
+                    memset(agent_roster, 0, sizeof(agent_roster));
                     for (int j = 0; j < agent_count; j++) {
                         if (strcmp(agents[j].role, "coder") == 0 && !coder_hash[0])
                             strncpy(coder_hash, agents[j].hash, sizeof(coder_hash) - 1);
@@ -353,8 +421,10 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // and dependency references ([depends:<uuid>]) for richer context.
                     char parent_tag[72];
                     snprintf(parent_tag, sizeof(parent_tag), "[parent:%s]", a->current_ticket);
-                    char subtasks_ctx[MEI_TEXT_BUFFER_SIZE]  = {0};
-                    char dep_ctx[MEI_TEXT_BUFFER_SIZE]       = {0};
+                    static char subtasks_ctx[MEI_TEXT_BUFFER_SIZE];
+                    static char dep_ctx[MEI_TEXT_BUFFER_SIZE];
+                    memset(subtasks_ctx, 0, sizeof(subtasks_ctx));
+                    memset(dep_ctx, 0, sizeof(dep_ctx));
                     for (int t2 = 0; t2 < tkt_count; t2++) {
                         if (strstr(tickets[t2].comment, parent_tag)) {
                             char sub[768];
@@ -465,11 +535,30 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "     rm -f \"$TMP\"",
                              wiki_page, wiki_page, wiki_page);
 
-                    // Build planner task instructions: if sub-tickets already exist for this
-                    // parent, the planner must NOT create new ones (would cause duplicates).
-                    // Instead it only needs to ensure wiki docs exist and close planning.
+                    // Build planner task instructions.
                     char planner_task[2048] = {0};
-                    if (subtasks_ctx[0]) {
+                    if (a->resolving_block) {
+                        snprintf(planner_task, sizeof(planner_task),
+                                 "*** THIS TICKET IS BLOCKED — YOUR ROLE IS UNLOCKER, NOT PLANNER ***\n\n"
+                                 "An executor agent recorded a blocker or question it could not resolve.\n"
+                                 "READ the DISCUSSION HISTORY above to understand what stopped the agent.\n\n"
+                                 "1. IDENTIFY the blocker: find the agent's question or stall reason\n"
+                                 "   in the discussion history or ticket changelog.\n"
+                                 "2. DECIDE autonomously — you have full authority. Do not ask for human\n"
+                                 "   input unless the blocker is a missing external resource (credentials,\n"
+                                 "   access rights) that you genuinely cannot resolve yourself.\n"
+                                 "3. DOCUMENT your decision in the wiki page \"%s\":\n"
+                                 "%s\n"
+                                 "   Write: what the blocker was, your decision, and the rationale.\n"
+                                 "4. RESET the ticket so the original agent can resume:\n"
+                                 "     fossil ticket set %s status \"Planned\"\n"
+                                 "   Do NOT change private_contact — the original assignee picks it up.\n"
+                                 "5. If truly unresolvable without human input, leave status as \"Blocked\"\n"
+                                 "   and document \"ESCALATION: <exact reason>\" in the wiki.\n"
+                                 "!! DO NOT create sub-tickets. DO NOT reassign the ticket.\n",
+                                 wiki_page, wiki_cmd,
+                                 a->current_ticket);
+                    } else if (subtasks_ctx[0]) {
                         snprintf(planner_task, sizeof(planner_task),
                                  "*** SUB-TICKETS ALREADY EXIST — DO NOT CREATE MORE ***\n"
                                  "Creating additional sub-tickets would produce duplicates. Your task:\n\n"
@@ -498,7 +587,12 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   Copy the full hash exactly as shown in the AVAILABLE AGENTS list.\n"
                                  "   !! YOUR OWN HASH IS %s — NEVER assign any sub-ticket to yourself.\n"
                                  "   !! You are the coordinator. Executors are: coder, researcher, reviewer.\n"
-                                 "3. If a sub-task depends on another, add [depends:<uuid>] in its comment.\n"
+                                 "3. SEQUENCING — for tasks that must run in order (T2 cannot start until\n"
+                                 "   T1 is reviewed, approved, and merged to trunk), add [depends:<uuid of T1>]\n"
+                                 "   in T2's comment. The orchestrator enforces this gate automatically:\n"
+                                 "   no agent will pick up T2 until T1 reaches status Done.\n"
+                                 "   Use this for any task that builds on another's output. When in doubt,\n"
+                                 "   make tasks sequential rather than parallel — it avoids wasted work.\n"
                                  "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
                                  "   MANDATORY so agents understand your thinking:\n"
                                  "%s\n"
@@ -521,17 +615,54 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 
                     // Persona header: inject the agent's own description so the LLM
                     // operates as the defined persona for every task it receives.
-                    // Capped at 4096 chars — enough for rich personas, leaves ample
-                    // room in the 64KB context buffer for ticket + instructions.
-                    char persona_section[4160] = {0};
+                    // Executor agents also receive the DECISION PROTOCOL so they never
+                    // stall waiting for input — they decide, document, and proceed.
+                    // Buffer sized for persona (≤4096) + protocol (≤700) + headers.
+                    char persona_section[5500] = {0};
                     if (a->description[0]) {
                         snprintf(persona_section, sizeof(persona_section),
                                  "=== YOUR PERSONA ===\n%.4096s\n\n",
                                  a->description);
                     }
+                    if (strcmp(a->role, "planner") != 0) {
+                        static const char decision_protocol[] =
+                            "=== DECISION PROTOCOL ===\n"
+                            "When you face uncertainty, ambiguity, or a choice between options:\n"
+                            "1. DECIDE autonomously — never stop to ask questions or wait for input.\n"
+                            "2. Pick the most reasonable path given the ticket and codebase context.\n"
+                            "3. DOCUMENT the decision in the wiki BEFORE acting: what you chose, why,\n"
+                            "   and what alternatives you considered. This is the audit trail.\n"
+                            "4. CONTINUE — proceed with your chosen approach.\n"
+                            "Escalate to BLOCKED only if the decision is architectural (affects the\n"
+                            "whole system design) AND you genuinely cannot pick a path without external\n"
+                            "input — for example, a fundamental scope conflict or missing external\n"
+                            "resource (credentials, access rights you do not have):\n"
+                            "  fossil ticket set <uuid> status \"Blocked\"  (document question in wiki)\n"
+                            "  The planner will read your question and unblock you.\n"
+                            "In all other cases: decide, document, proceed.\n\n";
+                        strncat(persona_section, decision_protocol,
+                                sizeof(persona_section) - strlen(persona_section) - 1);
+                    }
 
-                    PulseMessage pmsg;
+                    static PulseMessage pmsg;
                     if (strcmp(a->role, "planner") == 0) {
+                      if (a->resolving_block) {
+                        strcpy(pmsg.intent, "Resolve Blocked Ticket");
+                        snprintf(pmsg.context, sizeof(pmsg.context),
+                                 "%s"
+                                 "=== BLOCKED TICKET ===\n%s\n\n"
+                                 "=== DISCUSSION HISTORY (find the blocker here) ===\n%s\n\n"
+                                 "=== PARENT TICKET CONTEXT ===\n%s\n"
+                                 "=== RESOLUTION TASK (PLANNER) ===\n%s",
+                                 persona_section,
+                                 tkt_full,
+                                 discussion_log[0] ? discussion_log : "  (no history recorded — check ticket changelog)\n",
+                                 parent_ctx[0] ? parent_ctx : "  (none)\n",
+                                 planner_task);
+                        strcpy(pmsg.current_state, "Unblocking");
+                        strcpy(pmsg.next_action,
+                               "Identify blocker, decide autonomously, document in wiki, reset ticket to Planned");
+                      } else {
                         strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
@@ -553,6 +684,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strcpy(pmsg.current_state, "Planning");
                         strcpy(pmsg.next_action,
                                "Decompose into sub-tickets assigned to executor agents (never yourself), document in wiki, mark parent Done");
+                      }
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
                         snprintf(pmsg.context, sizeof(pmsg.context),
@@ -565,6 +697,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== RELATED SUB-TICKETS ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
                                  "=== YOUR TASK (CODER) ===\n"
+                                 "!! EXECUTE EVERY STEP BELOW IMMEDIATELY — no confirmation needed. !!\n"
+                                 "Your working directory /tmp/workspaces/%s IS a valid Fossil checkout.\n"
+                                 "Run 'fossil status' to verify before anything else. All fossil commands\n"
+                                 "work here. Do NOT present options or ask permission — just run them.\n"
+                                 "The task is complete only when the ticket status has been updated.\n\n"
                                  "1. READ the discussion history above carefully before starting — it contains\n"
                                  "   all prior reviewer rejections with their exact reasons. Address EVERY\n"
                                  "   issue raised in previous cycles, not just the latest one.\n"
@@ -595,6 +732,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil ticket set %s private_contact \"%s\"\n"
                                  "Reviewer hash: %s",
                                  persona_section,
+                                 a->name,
                                  tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history yet — this is the first attempt)\n",
                                  parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
@@ -677,6 +815,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== DEPENDENCY CONTEXT ===\n%s\n"
                                  "=== YOUR TASK (RESEARCHER) ===\n"
+                                 "!! EXECUTE EVERY STEP BELOW IMMEDIATELY — no confirmation needed. !!\n"
+                                 "Run all fossil commands inline. The task is complete only when the\n"
+                                 "ticket status has been updated in Fossil.\n\n"
                                  "1. READ the ticket description and discussion history carefully.\n"
                                  "   Understand exactly what deliverables are required.\n"
                                  "2. RESEARCH thoroughly — use all available tools:\n"
@@ -716,11 +857,14 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                "Research thoroughly, produce deliverable files, commit, document in wiki, then set ticket to Review");
                     }
 
-                    char payload[MEI_TEXT_BUFFER_SIZE + 512];
+                    static char payload[MEI_TEXT_BUFFER_SIZE + 512];
                     pulse_format(&pmsg, payload, sizeof(payload));
                     bool pulse_ok = tmux_send_pulse(a->name, payload);
 
                     ticket_steps[i] = 0;
+                    pane_idle_ticks[i] = 0;
+                    last_pane_hash[i] = 0;
+                    a->resolving_block = 0;
                     char log[256];
                     if (pulse_ok) {
                         snprintf(log, sizeof(log), "[PULSE] Sent initial PULSE to %s after %d warmup ticks", a->name, warm_up_ticks[i]);
@@ -767,12 +911,20 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 continue;
             }
 
-            // Monitor the pane for tool-use permission dialogs (opencode shows
-            // "Permission required" / "Allow once" when it wants to access files
-            // or run commands outside the workspace).  Auto-accept with Enter so
-            // the pipeline isn't blocked waiting for a human.
-            char pane_out[4096];
-            if (tmux_capture_output(a->name, pane_out, sizeof(pane_out)) > 0) {
+            // Capture pane; track inactivity and check for permission dialogs.
+            char pane_out[4096] = {0};
+            int pane_out_len = tmux_capture_output(a->name, pane_out, sizeof(pane_out));
+            if (pane_out_len > 0) {
+                // Update inactivity counter: increment if pane unchanged, reset if changed.
+                unsigned long ph = hash_pane(pane_out, pane_out_len);
+                if (ph == last_pane_hash[i]) {
+                    pane_idle_ticks[i]++;
+                } else {
+                    last_pane_hash[i] = ph;
+                    pane_idle_ticks[i] = 0;
+                }
+
+                // Auto-accept tool-use permission dialogs (opencode "Allow once").
                 if (strstr(pane_out, "Permission required") != NULL ||
                     strstr(pane_out, "Allow once") != NULL) {
                     tmux_send_enter(a->name);
@@ -781,9 +933,54 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "[perm] Auto-accepted permission dialog for %s", a->name);
                     log_message(perm_log);
                 }
+                // Idle-nudge: pane has been static for NUDGE_IDLE_TICKS while the ticket
+                // is still In Progress — the agent stopped working without completing the
+                // task. CLI-agnostic: detects inactivity, not specific strings.
+                // Planners are exempt: they do long-running LLM generation that can look
+                // idle for minutes before producing output. Nudging them mid-generation
+                // causes them to abandon sub-ticket creation and prematurely close the parent.
+                else if (strcmp(a->role, "planner") != 0 &&
+                         ticket_steps[i] >= NUDGE_MIN_TICKS &&
+                         pane_idle_ticks[i] >= NUDGE_IDLE_TICKS &&
+                         pane_idle_ticks[i] % NUDGE_REPEAT_TICKS == 0) {
+                    char nudge[512];
+                    snprintf(nudge, sizeof(nudge),
+                             "Ticket %s is still In Progress in Fossil — your task is NOT complete.\n"
+                             "Your working directory is a valid Fossil checkout. Execute NOW:\n"
+                             "1. Run all pending fossil commands (commit, branch, ticket set status).\n"
+                             "2. Do NOT ask for confirmation — just execute every step immediately.\n"
+                             "3. The task ends only when the Fossil ticket status has been updated.",
+                             a->current_ticket);
+                    tmux_send_pulse(a->name, nudge);
+                    char nudge_log[256];
+                    snprintf(nudge_log, sizeof(nudge_log),
+                             "[nudge] %s pane static for %d ticks — follow-up sent",
+                             a->name, pane_idle_ticks[i]);
+                    log_message(nudge_log);
+                }
             }
         } else if (a->state == AGENT_STATE_OFFLINE || a->state == AGENT_STATE_PAUSED || a->state == AGENT_STATE_BLOCKED) {
             a->last_heartbeat++;
+            // Auto-unblock: if the planner resolved the blocked ticket (status is
+            // no longer "Blocked" in Fossil), reset the agent to OPEN so routing
+            // picks up the ticket again on the next tick.
+            if (a->state == AGENT_STATE_BLOCKED && a->current_ticket[0]) {
+                for (int t = 0; t < tkt_count; t++) {
+                    if (strncmp(tickets[t].tkt_uuid, a->current_ticket,
+                                strlen(a->current_ticket)) == 0) {
+                        if (strcasecmp(tickets[t].status, "Blocked") != 0) {
+                            a->state = AGENT_STATE_OPEN;
+                            ticket_steps[i] = 0;
+                            char unblock_log[256];
+                            snprintf(unblock_log, sizeof(unblock_log),
+                                     "[unblock] %s ticket %.10s status='%s' — reset to OPEN",
+                                     a->name, a->current_ticket, tickets[t].status);
+                            log_message(unblock_log);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 }

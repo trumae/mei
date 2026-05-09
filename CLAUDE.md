@@ -28,3 +28,24 @@ C99 multi-agent orchestrator using **Fossil SCM** as the single source of truth 
 - Assignee → `private_contact` field
 - States: `AGENT_STATE_OPEN`, `AGENT_STATE_IN_PROGRESS`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_PAUSED`
 - Step limit: `MAX_STEPS_PER_TICKET` = 50 (prevents infinite agent loops)
+
+## Agent Decision & Unblocking Protocol
+Executor agents (coder, reviewer, researcher) receive a **DECISION PROTOCOL** section in every
+PULSE that instructs them to decide autonomously, document the choice in the wiki, and continue.
+They escalate to `BLOCKED` only for genuine architectural blockers (scope conflicts, missing
+external credentials) — not for ordinary ambiguity.
+
+When a ticket is set to `Blocked`, the planner picks it up automatically:
+1. **Planner routing** (`orchestrator.c:role_accepts`): planner accepts `Open` (non-sub-task) OR
+   any `Blocked` ticket. The flag `Agent.resolving_block` carries this intent to the PULSE phase.
+2. **Planner PULSE** (`orchestrator.c` IN_PROGRESS build): if `resolving_block`, sends
+   `"Resolve Blocked Ticket"` intent instead of the normal decomposition task. Task instructs the
+   planner to identify the blocker from the discussion history, decide, document in wiki, and reset
+   ticket status to `"Planned"` (keeping the original `private_contact`).
+3. **Auto-unblock** (`orchestrator.c` BLOCKED agent handling): on each tick, if the blocked
+   agent's ticket status is no longer `"Blocked"` in Fossil (planner resolved it), the agent is
+   reset to `AGENT_STATE_OPEN` and picks up its ticket on the next routing cycle.
+
+Stall-timeout blocks (agent exceeded `MAX_STEPS_PER_TICKET`) also route to the planner.
+If the planner cannot resolve it, it leaves status `"Blocked"` with `ESCALATION: <reason>` in
+the wiki, requiring human intervention.

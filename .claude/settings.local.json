@@ -112,7 +112,8 @@
       "Bash(grep -v \"^gcc\\\\|^$\")",
       "Bash(./bin/orchestrator_ui *)",
       "Bash(rm -f testproject.fossil)",
-      "Bash(/Users/viniciusmaciel/projs/MEI/bin/orchestrator_ui new *)"
+      "Bash(/Users/viniciusmaciel/projs/MEI/bin/orchestrator_ui new *)",
+      "Bash(tmux list-panes *)"
     ]
   }
 }

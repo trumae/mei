@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <ncurses.h>
 #include <pthread.h>
 
@@ -21,6 +22,20 @@ pthread_mutex_t g_agents_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void handle_sigint(int sig) {
     (void)sig;
     g_running = 0;
+}
+
+static void handle_fatal(int sig) {
+    // Async-signal-safe: write() only, no stdio.
+    const char *msg;
+    if (sig == SIGSEGV) msg = "[CRASH] SIGSEGV — segmentation fault\n";
+    else if (sig == SIGBUS)  msg = "[CRASH] SIGBUS — bus error\n";
+    else if (sig == SIGTERM) msg = "[CRASH] SIGTERM — terminated\n";
+    else if (sig == SIGHUP)  msg = "[CRASH] SIGHUP — hangup\n";
+    else                     msg = "[CRASH] fatal signal\n";
+    int fd = open("/tmp/mei.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd >= 0) { write(fd, msg, strlen(msg)); close(fd); }
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 static void *tick_thread_fn(void *arg) {
@@ -79,7 +94,12 @@ int cmd_run(int argc, char *argv[]) {
 
     init_ui();
     draw_splash(NULL);
-    signal(SIGINT, handle_sigint);
+    signal(SIGINT,  handle_sigint);
+    signal(SIGHUP,  handle_fatal);
+    signal(SIGTERM, handle_fatal);
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGSEGV, handle_fatal);
+    signal(SIGBUS,  handle_fatal);
 
     char msg[512];
     snprintf(msg, sizeof(msg), "System initializing... Target Repo: %s", abs_repo);
@@ -97,7 +117,7 @@ int cmd_run(int argc, char *argv[]) {
     pthread_t    tick_thread;
     pthread_attr_t tick_attr;
     pthread_attr_init(&tick_attr);
-    pthread_attr_setstacksize(&tick_attr, 16 * 1024 * 1024); // 16MB: orchestrator_tick uses ~7MB of stack
+    pthread_attr_setstacksize(&tick_attr, 2 * 1024 * 1024); // 2MB: large locals in orchestrator_tick are now static
     pthread_attr_setdetachstate(&tick_attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&tick_thread, &tick_attr, tick_thread_fn, NULL);
     pthread_attr_destroy(&tick_attr);
@@ -132,6 +152,7 @@ int cmd_run(int argc, char *argv[]) {
                     system(cmd);
                     reset_prog_mode();
                     refresh();
+                    flushinp(); // discard buffered keystrokes from agent pane
                     snprintf(log, sizeof(log), "[ok] Detached from %s — ticks resuming.",
                              agents[selected_agent].name);
                     log_message(log);

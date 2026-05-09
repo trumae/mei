@@ -25,6 +25,7 @@ typedef struct {
     int last_heartbeat;
     int step_count;
     char current_ticket[64];
+    int resolving_block;
 } Agent;
 
 #define MAX_AGENTS 10
