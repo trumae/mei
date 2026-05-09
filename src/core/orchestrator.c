@@ -43,8 +43,8 @@ static unsigned long hash_pane(const char *s, int len) {
 #define NUDGE_REPEAT_TICKS      60   // re-nudge every ~120s while still idle
 // Planner uses a much higher idle threshold: planners do multi-step reasoning where
 // the LLM finishes one analytical turn and pauses before executing commands.
-// 150 ticks (~5 min) gives enough room for generation without leaving it stuck forever.
-#define NUDGE_IDLE_TICKS_PLANNER  150  // ~5 min idle before nudging planner
+// 30 ticks (~1 min) gives enough room for generation without leaving it stuck forever.
+#define NUDGE_IDLE_TICKS_PLANNER  30  // ~1 min idle before nudging planner
 
 // Check whether all [depends:uuid] tags in a ticket comment point to tickets
 // that are Done. Tickets not found in the active array are assumed Done (they
@@ -158,6 +158,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
     // stack. orchestrator_tick is always called from a single thread sequentially,
     // so static storage is safe.
     static FossilTicket tickets[100];
+    static int tick_counter = 0;
+    tick_counter++;
     int tkt_count = fossil_ticket_list_parsed(tickets, 100);
 
     for (int i = 0; i < agent_count; i++) {
@@ -206,7 +208,24 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // Also accept re-opened sub-tickets (user manually reset to Open)
                     role_accepts = is_delegated && (tkt_planned || tkt_rework || (tkt_open && is_subtask));
                 } else if (strcmp(a->role, "reviewer") == 0) {
-                    role_accepts = is_delegated && tkt_review;
+                    // Two paths for a reviewer:
+                    // 1. Any Review-status ticket not assigned to a different reviewer
+                    //    (handles unassigned, coder-still-holding, or directly delegated).
+                    // 2. Planned tickets explicitly delegated to this reviewer by the planner
+                    //    (planner may assign QA work directly without a coding step).
+                    int assigned_to_other_reviewer = 0;
+                    if (!is_delegated && assignee_known) {
+                        for (int j = 0; j < agent_count; j++) {
+                            if (strcmp(agents[j].role, "reviewer") == 0 &&
+                                (strcmp(tickets[t].assignee, agents[j].hash) == 0 ||
+                                 strcmp(tickets[t].assignee, agents[j].name) == 0)) {
+                                assigned_to_other_reviewer = 1;
+                                break;
+                            }
+                        }
+                    }
+                    role_accepts = (tkt_review && !assigned_to_other_reviewer) ||
+                                   (is_delegated && (tkt_planned || tkt_rework));
                 } else {
                     // Researcher/catch-all: picks up unassigned Open tickets (original
                     // catch-all) AND Planned/Rework tickets explicitly delegated to it
@@ -225,11 +244,30 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     strcmp(a->role, "reviewer") != 0) {
                     if (!deps_satisfied(tickets, tkt_count, tickets[t].comment)) {
                         role_accepts = 0;
-                        char dep_log[256];
-                        snprintf(dep_log, sizeof(dep_log),
-                                 "[dep-gate] %s skipping ticket %.10s — dependency not Done",
-                                 a->name, tickets[t].tkt_uuid);
-                        log_message(dep_log);
+                        // Rate-limit dep-gate log: one entry per ticket per 30 ticks (~60s).
+                        // Without this, 7 blocked tickets × every tick = 210 log lines/minute.
+                        static char dep_gate_logged_uuid[100][41];
+                        static int  dep_gate_logged_tick[100];
+                        static int  dep_gate_slots = 0;
+                        int slot = -1;
+                        for (int s = 0; s < dep_gate_slots; s++) {
+                            if (strncmp(dep_gate_logged_uuid[s], tickets[t].tkt_uuid, 40) == 0) {
+                                slot = s; break;
+                            }
+                        }
+                        if (slot < 0 && dep_gate_slots < 100) {
+                            slot = dep_gate_slots++;
+                            strncpy(dep_gate_logged_uuid[slot], tickets[t].tkt_uuid, 40);
+                            dep_gate_logged_tick[slot] = tick_counter - 30;
+                        }
+                        if (slot >= 0 && tick_counter - dep_gate_logged_tick[slot] >= 30) {
+                            dep_gate_logged_tick[slot] = tick_counter;
+                            char dep_log[256];
+                            snprintf(dep_log, sizeof(dep_log),
+                                     "[dep-gate] %s skipping ticket %.10s — dependency not Done",
+                                     a->name, tickets[t].tkt_uuid);
+                            log_message(dep_log);
+                        }
                     }
                 }
 
@@ -361,12 +399,39 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 }
 
                 if (cli_ready) {
-                    // Sync workspace with trunk before the agent starts work.
-                    char upd_cmd[512];
-                    snprintf(upd_cmd, sizeof(upd_cmd),
-                             "cd /tmp/workspaces/%s && fossil update trunk >/dev/null 2>&1 &",
-                             a->name);
-                    system(upd_cmd);
+                    // Branch name is ticket-scoped and used for both workspace setup
+                    // and PULSE construction — declare it once here.
+                    char branch_name[32] = {0};
+                    snprintf(branch_name, sizeof(branch_name),
+                             "tkt-%.8s", a->current_ticket);
+
+                    // For implementation roles, create the ticket branch in the
+                    // repository and switch the workspace to it before sending the
+                    // PULSE. The agent only needs to run `fossil update <branch>` —
+                    // it never creates branches. This prevents ghost branches caused
+                    // by agents committing to trunk after a failed branch creation.
+                    if (strcmp(a->role, "coder") == 0 ||
+                        strcmp(a->role, "researcher") == 0) {
+                        char branch_cmd[512];
+                        snprintf(branch_cmd, sizeof(branch_cmd),
+                                 "cd /tmp/workspaces/%s && "
+                                 "fossil branch new %s trunk >/dev/null 2>&1 || true && "
+                                 "fossil update %s >/dev/null 2>&1",
+                                 a->name, branch_name, branch_name);
+                        system(branch_cmd);
+                        char branch_log[128];
+                        snprintf(branch_log, sizeof(branch_log),
+                                 "[branch] Created/switched workspace %s → %s",
+                                 a->name, branch_name);
+                        log_message(branch_log);
+                    } else {
+                        // Planner/reviewer: sync to trunk as before.
+                        char upd_cmd[512];
+                        snprintf(upd_cmd, sizeof(upd_cmd),
+                                 "cd /tmp/workspaces/%s && fossil update trunk >/dev/null 2>&1",
+                                 a->name);
+                        system(upd_cmd);
+                    }
                     char upd_log[128];
                     snprintf(upd_log, sizeof(upd_log),
                              "[sync] Workspace updated for %s before PULSE", a->name);
@@ -383,10 +448,6 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                             break;
                         }
                     }
-
-                    // Derive branch name from first 8 chars of ticket UUID
-                    char branch_name[32] = {0};
-                    snprintf(branch_name, sizeof(branch_name), "tkt-%.8s", a->current_ticket);
 
                     // Point 5: collect next-role hashes AND build agent roster for planner.
                     char coder_hash[128]    = {0};
@@ -578,47 +639,34 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->current_ticket);
                     } else {
                         snprintf(planner_task, sizeof(planner_task),
-                                 "1. Analyze the ticket and decompose it into concrete sub-tasks.\n"
-                                 "   For each sub-task, read AVAILABLE AGENTS above and choose the\n"
-                                 "   agent whose 'desc' and 'capabilities' best match the work needed.\n"
-                                 "   Do NOT default every sub-task to the same agent — use the full\n"
-                                 "   roster. The right agent is the one whose capabilities fit the task.\n"
-                                 "2. For EACH sub-task create a sub-ticket using the chosen agent's hash:\n"
-                                 "     fossil ticket add title \"<sub-task title>\" \\\n"
-                                 "       comment \"[parent:%s] <sub-task description>\" \\\n"
-                                 "       status \"Planned\" \\\n"
-                                 "       private_contact \"<full hash from AVAILABLE AGENTS>\"\n"
-                                 "   Copy the full hash exactly as shown in the AVAILABLE AGENTS list.\n"
-                                 "   !! YOUR OWN HASH IS %s — NEVER assign any sub-ticket to yourself.\n"
-                                 "   !! You are the coordinator. Executors are: coder, researcher, reviewer.\n"
-                                 "3. SEQUENCING — if a later sub-task depends on an earlier one completing\n"
-                                 "   first (e.g. implementation must finish before review starts), you MUST\n"
-                                 "   include a [depends:UUID] tag in the later ticket's comment field.\n"
-                                 "   CRITICAL: UUID must be the EXACT 40-character hex UUID that Fossil\n"
-                                 "   printed when you ran 'fossil ticket add' for the earlier ticket.\n"
-                                 "   Example — if the earlier ticket's UUID is\n"
-                                 "     abc123def456...  (40 hex chars, shown after 'fossil ticket add')\n"
-                                 "   then the later ticket's comment must include:\n"
-                                 "     [depends:abc123def456...]\n"
-                                 "   !! Do NOT write [depends:T1] or any other placeholder.\n"
-                                 "   !! Only real 40-char hex UUIDs are recognised by the orchestrator.\n"
-                                 "   When in doubt, make tasks sequential — it avoids wasted work.\n"
-                                 "4. DOCUMENT your planning rationale in the ticket wiki page \"%s\" —\n"
-                                 "   MANDATORY so agents understand your thinking:\n"
+                                 "!! EXECUTE IMMEDIATELY — do NOT describe what you will do.\n"
+                                 "!! Do NOT output 'Próximos Passos' or any roadmap narration.\n"
+                                 "!! Run the fossil commands now, in this response.\n\n"
+                                 "STEP 1 — CREATE SUB-TICKETS NOW:\n"
+                                 "For each sub-task, pick the agent from AVAILABLE AGENTS whose\n"
+                                 "capabilities best match. Do NOT default everything to one agent.\n"
+                                 "YOUR OWN HASH IS %s — NEVER assign a sub-ticket to yourself.\n"
+                                 "Executors are: coder, researcher, reviewer.\n\n"
+                                 "Run this command once per sub-task:\n"
+                                 "  fossil ticket add title \"<sub-task title>\" \\\n"
+                                 "    comment \"[parent:%s] <sub-task description>\" \\\n"
+                                 "    status \"Planned\" \\\n"
+                                 "    private_contact \"<full agent hash from AVAILABLE AGENTS>\"\n\n"
+                                 "SEQUENCING — if sub-task B must wait for sub-task A, add to B's comment:\n"
+                                 "  [depends:<UUID that fossil printed for A>]\n"
+                                 "  UUID = exact 40-char hex from the 'fossil ticket add' output.\n"
+                                 "  NEVER write [depends:T1] or any placeholder. Only real UUIDs work.\n"
+                                 "  When unsure, make tasks sequential — it avoids wasted work.\n\n"
+                                 "STEP 2 — DOCUMENT in wiki page \"%s\":\n"
                                  "%s\n"
-                                 "   Write a markdown section with:\n"
-                                 "   - Why you chose this decomposition (reasoning, not just a list)\n"
-                                 "   - Which agent handles each sub-task and why that agent was chosen\n"
-                                 "   - Key technical risks and open questions you identified\n"
-                                 "   - Dependencies between sub-tasks and suggested execution order\n"
-                                 "   - Success criteria: what each sub-task must deliver to be done\n"
-                                 "   - Any assumptions you made about the requirements\n"
-                                 "5. After documenting, mark the parent ticket as Done:\n"
-                                 "     fossil ticket set %s status \"Done\"\n"
-                                 "   The parent's job is to produce the sub-tickets. Once that is done,\n"
-                                 "   it must be closed. Do NOT assign it to any agent for implementation.\n"
-                                 "   All remaining work lives in the sub-tickets.\n",
-                                 a->current_ticket, a->hash,
+                                 "  - Why this decomposition, which agent per sub-task and why\n"
+                                 "  - Dependencies and execution order\n"
+                                 "  - Key risks and success criteria\n\n"
+                                 "STEP 3 — CLOSE the parent ticket:\n"
+                                 "  fossil ticket set %s status \"Done\"\n"
+                                 "The parent's job is done once sub-tickets exist. Do NOT assign it\n"
+                                 "to any agent for implementation — all work lives in sub-tickets.\n",
+                                 a->hash, a->current_ticket,
                                  wiki_page, wiki_cmd,
                                  a->current_ticket);
                     }
@@ -709,25 +757,36 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== YOUR TASK (CODER) ===\n"
                                  "!! EXECUTE EVERY STEP BELOW IMMEDIATELY — no confirmation needed. !!\n"
                                  "Your working directory /tmp/workspaces/%s IS a valid Fossil checkout.\n"
-                                 "Run 'fossil status' to verify before anything else. All fossil commands\n"
-                                 "work here. Do NOT present options or ask permission — just run them.\n"
+                                 "Do NOT present options or ask permission — just run the commands.\n"
                                  "The task is complete only when the ticket status has been updated.\n\n"
                                  "1. READ the discussion history above carefully before starting — it contains\n"
                                  "   all prior reviewer rejections with their exact reasons. Address EVERY\n"
                                  "   issue raised in previous cycles, not just the latest one.\n"
-                                 "2. Create a dedicated branch:\n"
-                                 "     fossil branch new %s trunk\n"
-                                 "     fossil update %s\n"
+                                 "2. The orchestrator already created and switched your workspace to branch %s.\n"
+                                 "   Confirm with:\n"
+                                 "     fossil status | head -3\n"
+                                 "   The output MUST show 'tags: %s'. If it shows 'trunk' or anything\n"
+                                 "   else, run `fossil update %s` to correct it before writing any code.\n"
+                                 "   !! Never commit to trunk — that bypasses review entirely.\n"
                                  "3. READ the ticket description carefully. Implement EXACTLY what is asked.\n"
                                  "   Do NOT use your own name, agent name, or placeholder values anywhere\n"
                                  "   in the code (e.g. module names, package names, comments).\n"
                                  "   Use names derived from the ticket title and project context.\n"
                                  "4. WRITE COMPLETE CODE — not stubs, not Hello World unless the ticket\n"
                                  "   explicitly asks for a Hello World. Every function must be implemented.\n"
-                                 "   The code must compile and run without errors.\n"
-                                 "5. VERIFY before submitting: build and run the code to confirm it works.\n"
-                                 "6. COMMIT your changes:\n"
+                                 "5. BUILD before committing — this is mandatory, not optional:\n"
+                                 "   Identify the build system (Makefile → `make`, Cargo.toml → `cargo build`,\n"
+                                 "   go.mod → `go build ./...`, package.json → `npm run build`, etc.) and run\n"
+                                 "   the appropriate command. Capture the full output.\n"
+                                 "   The build MUST exit with zero errors. Fix ALL compiler errors and\n"
+                                 "   warnings before continuing. Do NOT commit broken code under any\n"
+                                 "   circumstances — the reviewer will reject it and you will redo the work.\n"
+                                 "6. COMMIT only after a clean build:\n"
                                  "     fossil commit -m \"Implement %s: %s\"\n"
+                                 "   After committing, verify the commit landed on the right branch:\n"
+                                 "     fossil info | grep tags\n"
+                                 "   If it shows 'trunk', your commit went to the wrong place — STOP and\n"
+                                 "   ask for help by setting the ticket to Blocked with an explanation.\n"
                                  "7. DOCUMENT your implementation in the ticket wiki page \"%s\" — MANDATORY\n"
                                  "   before submitting. The reviewer and future agents will read this:\n"
                                  "%s\n"
@@ -749,7 +808,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none - first attempt)",
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none)\n",
                                  dep_ctx[0] ? dep_ctx : "  (none)\n",
-                                 branch_name, branch_name,
+                                 branch_name, branch_name, branch_name,
                                  a->current_ticket, tkt_info.title,
                                  wiki_page, wiki_cmd,
                                  a->current_ticket, a->current_ticket, reviewer_hash, reviewer_hash);
@@ -772,28 +831,41 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "     fossil update %s\n"
                                  "3. Read EVERY file that was changed. Use `fossil diff --from trunk` to\n"
                                  "   see exactly what was added or modified.\n"
-                                 "4. Verify EACH requirement in the ticket description is fully satisfied:\n"
+                                 "4. BUILD the code on the branch — this is the first gate, non-negotiable:\n"
+                                 "   Identify the build system from the repository root (look for Makefile,\n"
+                                 "   Cargo.toml, go.mod, package.json, build.gradle, CMakeLists.txt, etc.)\n"
+                                 "   and run the appropriate build command (e.g. `make`, `cargo build`,\n"
+                                 "   `go build ./...`, `npm run build`). Capture the full output.\n"
+                                 "   !! If the build exits with ANY errors → REJECT immediately. Do not\n"
+                                 "   read further. Broken code must never be approved.\n"
+                                 "   Record the exact build command used and its full output in the wiki.\n"
+                                 "5. Verify EACH requirement in the ticket description is fully satisfied:\n"
                                  "   - If the ticket asks for specific files, check they exist and are non-trivial.\n"
-                                 "   - If the ticket asks for working code, BUILD and RUN it (e.g. `go build ./...`,\n"
-                                 "     `go vet ./...`, run tests if present).\n"
-                                 "   - Reject placeholder/stub code (e.g. empty functions, Hello World where real\n"
-                                 "     logic was expected, hardcoded values, TODO comments left in).\n"
-                                 "   - Reject if module/package names are nonsensical (agent names, temp names).\n"
-                                 "5. DOCUMENT your full review findings in the ticket wiki page \"%s\" — MANDATORY\n"
+                                 "   - Run the resulting binary and verify it behaves as specified.\n"
+                                 "   - Reject placeholder/stub code (empty functions, hardcoded values, TODOs).\n"
+                                 "   - Reject if names are nonsensical (agent names, temp names, test values).\n"
+                                 "6. DOCUMENT your full review findings in the ticket wiki page \"%s\" — MANDATORY\n"
                                  "   before taking any action. Future agents depend on this record:\n"
                                  "%s\n"
                                  "   Write a markdown section with:\n"
                                  "   - Every file you reviewed and what you found\n"
-                                 "   - Every build/test command run and the exact output (pass/fail)\n"
+                                 "   - The EXACT output of `make 2>&1` (pass or fail with errors)\n"
                                  "   - Whether each requirement in the ticket spec was met (yes/no + evidence)\n"
                                  "   - VERDICT: APPROVED or REJECTED\n"
-                                 "   - If REJECTED: specific issues with file names, line numbers, exact problems\n"
-                                 "6. If ALL requirements met — merge into trunk AFTER documenting:\n"
+                                 "   - If REJECTED: specific issues with file names, line numbers, exact errors\n"
+                                 "7. If ALL requirements met AND build passed — merge into trunk:\n"
                                  "     fossil update trunk\n"
                                  "     fossil merge %s\n"
+                                 "   Then re-run the same build command you used in step 4 to verify the\n"
+                                 "   merged result still compiles cleanly.\n"
+                                 "   !! If the build fails after the merge, the branch introduced\n"
+                                 "   incompatibilities. Run `fossil revert` to undo the merge, then REJECT\n"
+                                 "   the ticket with the exact build error as the rejection reason.\n"
+                                 "   If the merged build succeeds, commit and close the branch:\n"
                                  "     fossil commit -m \"Merge %s: %s\"\n"
+                                 "     fossil tag add closed %s tip\n"
                                  "     fossil ticket set %s status \"Done\"\n"
-                                 "7. If ANYTHING is incomplete or wrong — AFTER documenting in wiki:\n"
+                                 "8. If ANYTHING is incomplete or wrong — AFTER documenting in wiki:\n"
                                  "   Record the summary rejection reason (coder will read this):\n"
                                  "     fossil ticket set %s reviewer_notes \"REJECTION: <summary of issues>\"\n"
                                  "   Return for rework:\n"
@@ -809,6 +881,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  branch_name,
                                  wiki_page, wiki_cmd,
                                  branch_name, branch_name, tkt_info.title,
+                                 branch_name,
                                  a->current_ticket,
                                  a->current_ticket,
                                  a->current_ticket, a->current_ticket, coder_hash, coder_hash);
