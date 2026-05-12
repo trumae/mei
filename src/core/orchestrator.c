@@ -62,8 +62,9 @@ static int deps_satisfied(FossilTicket *tickets, int tkt_count, const char *comm
         // Search for the dependency in the active tickets array.
         for (int t = 0; t < tkt_count; t++) {
             if (strncmp(tickets[t].tkt_uuid, dep_uuid, len) == 0) {
-                // Found — it is still open. Only satisfied if Done.
-                if (strcasecmp(tickets[t].status, "Done") != 0) return 0;
+                // Found — it is still open. Satisfied if Done or closed.
+                if (strcasecmp(tickets[t].status, "Done")   != 0 &&
+                    strcasecmp(tickets[t].status, "closed") != 0) return 0;
                 break;
             }
         }
@@ -206,32 +207,23 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 } else if (strcmp(a->role, "coder") == 0) {
                     int is_subtask = (strstr(tickets[t].comment, "[parent:") != NULL);
                     // Also accept re-opened sub-tickets (user manually reset to Open)
-                    role_accepts = is_delegated && (tkt_planned || tkt_rework || (tkt_open && is_subtask));
+                    // Also accept Review tickets when explicitly delegated by planner.
+                    role_accepts = is_delegated && (tkt_planned || tkt_rework || tkt_review || (tkt_open && is_subtask));
                 } else if (strcmp(a->role, "reviewer") == 0) {
                     // Two paths for a reviewer:
-                    // 1. Any Review-status ticket not assigned to a different reviewer
-                    //    (handles unassigned, coder-still-holding, or directly delegated).
-                    // 2. Planned tickets explicitly delegated to this reviewer by the planner
-                    //    (planner may assign QA work directly without a coding step).
-                    int assigned_to_other_reviewer = 0;
-                    if (!is_delegated && assignee_known) {
-                        for (int j = 0; j < agent_count; j++) {
-                            if (strcmp(agents[j].role, "reviewer") == 0 &&
-                                (strcmp(tickets[t].assignee, agents[j].hash) == 0 ||
-                                 strcmp(tickets[t].assignee, agents[j].name) == 0)) {
-                                assigned_to_other_reviewer = 1;
-                                break;
-                            }
-                        }
-                    }
-                    role_accepts = (tkt_review && !assigned_to_other_reviewer) ||
+                    // 1. Any Review-status ticket not assigned to another known agent
+                    //    (handles unassigned or directly delegated tickets).
+                    //    If the ticket is assigned to a coder/researcher for review, they handle it.
+                    // 2. Planned/Rework tickets explicitly delegated to this reviewer by the planner.
+                    int assigned_to_other = !is_delegated && assignee_known;
+                    role_accepts = (tkt_review && !assigned_to_other) ||
                                    (is_delegated && (tkt_planned || tkt_rework));
                 } else {
                     // Researcher/catch-all: picks up unassigned Open tickets (original
-                    // catch-all) AND Planned/Rework tickets explicitly delegated to it
-                    // by the planner — symmetric with the coder routing.
+                    // catch-all) AND Planned/Rework/Review tickets explicitly delegated
+                    // to it by the planner — symmetric with the coder routing.
                     role_accepts = (is_unassigned && tkt_open) ||
-                                   (is_delegated && (tkt_planned || tkt_rework));
+                                   (is_delegated && (tkt_planned || tkt_rework || tkt_review));
                 }
                 // Restart recovery: any agent resumes its own in-progress ticket.
                 int is_recovery = is_delegated && tkt_progress;
@@ -300,6 +292,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 strncpy(a->current_ticket, tickets[t].tkt_uuid, sizeof(a->current_ticket) - 1);
                 a->state = AGENT_STATE_IN_PROGRESS;
                 a->resolving_block = tkt_blocked;
+                a->doing_review    = tkt_review && (strcmp(a->role, "reviewer") != 0);
                 ticket_steps[i] = -1;
                 warm_up_ticks[i] = 0;
 
@@ -338,6 +331,23 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              a->name, a->current_ticket);
                     log_message(done_log);
 
+                    // When a non-reviewer agent submits work for review (sets ticket to
+                    // Review status), clear the assignee so the reviewer role can pick it
+                    // up freely. Without this, the ticket stays assigned to the coder/
+                    // researcher and the reviewer would skip it (assigned_to_other = true).
+                    if (strcasecmp(final_status, "Review") == 0 &&
+                        strcmp(a->role, "reviewer") != 0) {
+                        fossil_ticket_assign(a->current_ticket, "");
+                        // Update in-memory snapshot so routing this same tick is correct.
+                        for (int t = 0; t < tkt_count; t++) {
+                            if (strcmp(tickets[t].tkt_uuid, a->current_ticket) == 0) {
+                                tickets[t].assignee[0] = '\0';
+                                break;
+                            }
+                        }
+                        log_message("[review] Cleared assignee — ticket submitted for review");
+                    }
+
                     // Log the outcome to the ticket's wiki page so it's visible in Fossil web.
                     char wiki_msg[1024];
                     if (final_notes[0]) {
@@ -352,6 +362,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     fossil_wiki_append_log(a->current_ticket, a->name, wiki_msg);
 
                     a->state = AGENT_STATE_OPEN;
+                    a->doing_review = 0;
                     strcpy(a->current_ticket, "None");
                     ticket_steps[i] = 0;
                     warm_up_ticks[i] = 0;
@@ -815,7 +826,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strcpy(pmsg.current_state, "Coding");
                         strcpy(pmsg.next_action,
                                "Create branch, implement fully, build+verify, commit, then set ticket to Review");
-                    } else if (strcmp(a->role, "reviewer") == 0) {
+                    } else if (strcmp(a->role, "reviewer") == 0 || a->doing_review) {
                         strcpy(pmsg.intent, "Review, Verify, and Merge or Reject");
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"

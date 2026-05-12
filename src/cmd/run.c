@@ -19,13 +19,89 @@ static volatile int g_running     = 1;
 
 pthread_mutex_t g_agents_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// ──────────────────────────────────────────────
+// Ticket screen state — static to avoid large stack frames
+// ──────────────────────────────────────────────
+
+#define MAX_UI_TICKETS 200
+
+static ActiveScreen  g_screen          = SCREEN_AGENTS;
+static FossilTicket  g_tickets[MAX_UI_TICKETS];
+static int           g_ticket_count    = 0;
+static int           g_selected_ticket = 0;
+static int           g_sort_order      = TICKET_SORT_STATUS;
+
+// ──────────────────────────────────────────────
+// Ticket sort
+// ──────────────────────────────────────────────
+
+static int status_priority(const char *s) {
+    if (strcmp(s, "Blocked")     == 0) return 0;
+    if (strcmp(s, "In Progress") == 0) return 1;
+    if (strcmp(s, "Review")      == 0) return 2;
+    if (strcmp(s, "Rework")      == 0) return 3;
+    if (strcmp(s, "Planned")     == 0) return 4;
+    if (strcmp(s, "Open")        == 0) return 5;
+    return 6;
+}
+
+static int sort_order_ref;  // set before qsort call
+
+static int cmp_tickets(const void *a, const void *b) {
+    const FossilTicket *ta = (const FossilTicket *)a;
+    const FossilTicket *tb = (const FossilTicket *)b;
+    switch (sort_order_ref) {
+        case TICKET_SORT_TITLE:
+            return strncasecmp(ta->title, tb->title, sizeof(ta->title));
+        case TICKET_SORT_ASSIGN:
+            return strncasecmp(ta->assignee, tb->assignee, sizeof(ta->assignee));
+        default: { // TICKET_SORT_STATUS
+            int pa = status_priority(ta->status);
+            int pb = status_priority(tb->status);
+            if (pa != pb) return pa - pb;
+            return strncasecmp(ta->title, tb->title, sizeof(ta->title));
+        }
+    }
+}
+
+static void reload_tickets(void) {
+    g_ticket_count = fossil_ticket_list_parsed(g_tickets, MAX_UI_TICKETS);
+    sort_order_ref = g_sort_order;
+    if (g_ticket_count > 1)
+        qsort(g_tickets, g_ticket_count, sizeof(FossilTicket), cmp_tickets);
+    if (g_selected_ticket >= g_ticket_count)
+        g_selected_ticket = g_ticket_count > 0 ? g_ticket_count - 1 : 0;
+}
+
+// ──────────────────────────────────────────────
+// Status cycle
+// ──────────────────────────────────────────────
+
+static const char *status_order[] = {
+    "Open", "Planned", "In Progress", "Review", "Rework", "Blocked", "Done"
+};
+static const int STATUS_COUNT = 7;
+
+static const char *next_status(const char *current, int delta) {
+    for (int i = 0; i < STATUS_COUNT; i++) {
+        if (strcmp(status_order[i], current) == 0) {
+            int next = (i + delta + STATUS_COUNT) % STATUS_COUNT;
+            return status_order[next];
+        }
+    }
+    return "Open";
+}
+
+// ──────────────────────────────────────────────
+// Signal handlers
+// ──────────────────────────────────────────────
+
 static void handle_sigint(int sig) {
     (void)sig;
     g_running = 0;
 }
 
 static void handle_fatal(int sig) {
-    // Async-signal-safe: write() only, no stdio.
     const char *msg;
     if (sig == SIGSEGV) msg = "[CRASH] SIGSEGV — segmentation fault\n";
     else if (sig == SIGBUS)  msg = "[CRASH] SIGBUS — bus error\n";
@@ -38,13 +114,17 @@ static void handle_fatal(int sig) {
     raise(sig);
 }
 
+// ──────────────────────────────────────────────
+// Tick thread
+// ──────────────────────────────────────────────
+
 static void *tick_thread_fn(void *arg) {
     (void)arg;
     struct timespec last = {0, 0};
     clock_gettime(CLOCK_MONOTONIC, &last);
 
     while (g_running) {
-        usleep(100000); // poll every 100ms without blocking
+        usleep(100000);
 
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -58,6 +138,10 @@ static void *tick_thread_fn(void *arg) {
     }
     return NULL;
 }
+
+// ──────────────────────────────────────────────
+// Main command
+// ──────────────────────────────────────────────
 
 int cmd_run(int argc, char *argv[]) {
     const char *repo_arg = NULL;
@@ -112,32 +196,65 @@ int cmd_run(int argc, char *argv[]) {
     ui_set_ready();
 
     int selected_agent = 0;
-    timeout(200); // short timeout so UI refreshes ~5x/s regardless of input
+    timeout(200);
 
-    pthread_t    tick_thread;
+    pthread_t      tick_thread;
     pthread_attr_t tick_attr;
     pthread_attr_init(&tick_attr);
-    pthread_attr_setstacksize(&tick_attr, 2 * 1024 * 1024); // 2MB: large locals in orchestrator_tick are now static
+    pthread_attr_setstacksize(&tick_attr, 2 * 1024 * 1024);
     pthread_attr_setdetachstate(&tick_attr, PTHREAD_CREATE_DETACHED);
     pthread_create(&tick_thread, &tick_attr, tick_thread_fn, NULL);
     pthread_attr_destroy(&tick_attr);
 
     while (g_running) {
-        draw_main_screen(agents, agent_count, selected_agent);
+        if (g_screen == SCREEN_TICKETS) {
+            draw_tickets_screen(g_tickets, g_ticket_count, g_selected_ticket,
+                                g_sort_order, agents, agent_count);
+        } else {
+            draw_main_screen(agents, agent_count, selected_agent, g_screen);
+        }
 
         int ch = getch();
         switch (ch) {
+
+            // ── Universal ─────────────────────────────
             case 'q': case 'Q':
                 g_running = 0;
                 break;
+
+            case '\t':  // Tab — cycle screens
+            case KEY_BTAB: {
+                int next = ((int)g_screen + 1) % SCREEN_COUNT;
+                if (next == SCREEN_TICKETS) reload_tickets();
+                g_screen = (ActiveScreen)next;
+                break;
+            }
+            case '1':
+                g_screen = SCREEN_AGENTS;
+                break;
+            case '2':
+                if (g_screen != SCREEN_TICKETS) reload_tickets();
+                g_screen = SCREEN_TICKETS;
+                break;
+
+            // ── Agents screen ─────────────────────────
             case KEY_UP:
-                if (selected_agent > 0) selected_agent--;
+                if (g_screen == SCREEN_AGENTS) {
+                    if (selected_agent > 0) selected_agent--;
+                } else {
+                    if (g_selected_ticket > 0) g_selected_ticket--;
+                }
                 break;
             case KEY_DOWN:
-                if (selected_agent < agent_count - 1) selected_agent++;
+                if (g_screen == SCREEN_AGENTS) {
+                    if (selected_agent < agent_count - 1) selected_agent++;
+                } else {
+                    if (g_selected_ticket < g_ticket_count - 1) g_selected_ticket++;
+                }
                 break;
+
             case 'a': case 'A':
-                if (agent_count > 0) {
+                if (g_screen == SCREEN_AGENTS && agent_count > 0) {
                     char cmd[512];
                     snprintf(cmd, sizeof(cmd),
                              "tmux select-window -t mei:\"%s\"; tmux attach -t mei",
@@ -152,14 +269,15 @@ int cmd_run(int argc, char *argv[]) {
                     system(cmd);
                     reset_prog_mode();
                     refresh();
-                    flushinp(); // discard buffered keystrokes from agent pane
+                    flushinp();
                     snprintf(log, sizeof(log), "[ok] Detached from %s — ticks resuming.",
                              agents[selected_agent].name);
                     log_message(log);
                 }
                 break;
+
             case 'p': case 'P':
-                if (agent_count > 0) {
+                if (g_screen == SCREEN_AGENTS && agent_count > 0) {
                     pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_PAUSED;
                     pthread_mutex_unlock(&g_agents_mutex);
@@ -168,18 +286,24 @@ int cmd_run(int argc, char *argv[]) {
                     log_message(log);
                 }
                 break;
+
             case 'r': case 'R':
-                if (agent_count > 0) {
+                if (g_screen == SCREEN_AGENTS && agent_count > 0) {
                     pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_IN_PROGRESS;
                     pthread_mutex_unlock(&g_agents_mutex);
                     char log[256];
                     snprintf(log, sizeof(log), "Resumed agent: %s", agents[selected_agent].name);
                     log_message(log);
+                } else if (g_screen == SCREEN_TICKETS) {
+                    // Reload tickets from Fossil
+                    reload_tickets();
+                    log_message("[sync] Ticket list reloaded.");
                 }
                 break;
+
             case 'k': case 'K':
-                if (agent_count > 0) {
+                if (g_screen == SCREEN_AGENTS && agent_count > 0) {
                     pthread_mutex_lock(&g_agents_mutex);
                     agents[selected_agent].state = AGENT_STATE_OFFLINE;
                     pthread_mutex_unlock(&g_agents_mutex);
@@ -188,8 +312,46 @@ int cmd_run(int argc, char *argv[]) {
                     log_message(log);
                 }
                 break;
+
+            // ── Tickets screen ────────────────────────
+            case 's':   // next status
+                if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
+                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    const char *ns = next_status(t->status, +1);
+                    if (fossil_ticket_set_status(t->tkt_uuid, ns)) {
+                        char log[256];
+                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->tkt_uuid, ns);
+                        log_message(log);
+                        reload_tickets();
+                    }
+                }
+                break;
+
+            case 'S':   // prev status
+                if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
+                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    const char *ns = next_status(t->status, -1);
+                    if (fossil_ticket_set_status(t->tkt_uuid, ns)) {
+                        char log[256];
+                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->tkt_uuid, ns);
+                        log_message(log);
+                        reload_tickets();
+                    }
+                }
+                break;
+
+            case 'o': case 'O':   // cycle sort order
+                if (g_screen == SCREEN_TICKETS) {
+                    g_sort_order = (g_sort_order + 1) % 3;
+                    sort_order_ref = g_sort_order;
+                    if (g_ticket_count > 1)
+                        qsort(g_tickets, g_ticket_count, sizeof(FossilTicket), cmp_tickets);
+                    g_selected_ticket = 0;
+                }
+                break;
+
             case ERR:
-                break; // tick is handled by the background thread
+                break;
         }
     }
 
