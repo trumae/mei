@@ -240,14 +240,13 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         if (!is_own_rework) role_accepts = 0;
                     }
                 } else if (strcmp(a->role, "reviewer") == 0) {
-                    // Two paths for a reviewer:
-                    // 1. Any Review-status ticket not assigned to another known agent
-                    //    (handles unassigned or directly delegated tickets).
-                    //    If the ticket is assigned to a coder/researcher for review, they handle it.
-                    // 2. Planned/Rework tickets explicitly delegated to this reviewer by the planner.
+                    // Reviewer only acts when there is actual work to review: a ticket in
+                    // Review status, either unassigned (coder submitted normally) or directly
+                    // delegated by the planner. Planned/Rework tickets are never picked up —
+                    // those statuses mean work is not yet ready for review, and accepting them
+                    // would activate the reviewer before the coder has done anything.
                     int assigned_to_other = !is_delegated && assignee_known;
-                    role_accepts = (tkt_review && !assigned_to_other) ||
-                                   (is_delegated && (tkt_planned || tkt_rework));
+                    role_accepts = tkt_review && !assigned_to_other;
                 } else {
                     // Researcher/catch-all: picks up unassigned Open tickets (original
                     // catch-all) AND Planned/Rework/Review tickets explicitly delegated
@@ -721,6 +720,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "capabilities best match. Do NOT default everything to one agent.\n"
                                  "YOUR OWN HASH IS %s — NEVER assign a sub-ticket to yourself.\n"
                                  "Executors are: coder, researcher, reviewer.\n\n"
+                                 "!! NEVER create a sub-ticket assigned to the reviewer for reviewing\n"
+                                 "!! another sub-ticket. Review is automatic: when a coder finishes\n"
+                                 "!! and sets a ticket to status 'Review', the reviewer picks it up\n"
+                                 "!! on its own. Creating an explicit review sub-ticket activates the\n"
+                                 "!! reviewer before any work exists and causes infinite loops.\n\n"
                                  "Run this command once per sub-task:\n"
                                  "  fossil ticket add title \"<sub-task title>\" \\\n"
                                  "    comment \"[parent:%s] <sub-task description>\" \\\n"
