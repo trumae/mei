@@ -168,14 +168,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
         a->step_count = (ticket_steps[i] > 0) ? ticket_steps[i] : 0;
 
         if (a->state == AGENT_STATE_OPEN) {
-            // Clear pending_review_ticket only when the review cycle has ended:
-            // Done (approved), Rework (rejected), Planned (planner unblocked), or closed.
-            // "In Progress" means the reviewer is actively working — keep the gate.
+            // Clear pending_review_ticket only when the review cycle is truly over.
+            // "Done"/"closed" → approved, free to take new work.
+            // "Planned" → planner reset it, free to take new work.
+            // "Rework" is intentionally excluded: the coder still owns the ticket and
+            // must fix it. The gate stays so no other ticket is picked up, and the
+            // is_own_rework exception in role_accepts lets the coder re-acquire it.
             if (a->pending_review_ticket[0] != '\0') {
                 for (int t = 0; t < tkt_count; t++) {
                     if (strcmp(tickets[t].tkt_uuid, a->pending_review_ticket) == 0) {
                         int cycle_ended = (strcasecmp(tickets[t].status, "Done")    == 0 ||
-                                           strcasecmp(tickets[t].status, "Rework")  == 0 ||
                                            strcasecmp(tickets[t].status, "closed")  == 0 ||
                                            strcasecmp(tickets[t].status, "Planned") == 0);
                         if (cycle_ended) {
@@ -380,6 +382,33 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                 sizeof(a->pending_review_ticket) - 1);
                         a->pending_review_ticket[sizeof(a->pending_review_ticket) - 1] = '\0';
                         log_message("[review] Cleared assignee — ticket submitted for review");
+                    }
+
+                    // When the reviewer rejects (sets ticket to Rework), re-assign the
+                    // ticket back to the original submitter so they can pick it up without
+                    // requiring planner intervention. We find the submitter by scanning
+                    // pending_review_ticket on all agents.
+                    if (strcasecmp(final_status, "Rework") == 0 &&
+                        strcmp(a->role, "reviewer") == 0) {
+                        for (int j = 0; j < agent_count; j++) {
+                            if (j == i) continue;
+                            if (strcmp(agents[j].pending_review_ticket, a->current_ticket) == 0) {
+                                fossil_ticket_assign(a->current_ticket, agents[j].hash);
+                                for (int t = 0; t < tkt_count; t++) {
+                                    if (strcmp(tickets[t].tkt_uuid, a->current_ticket) == 0) {
+                                        strncpy(tickets[t].assignee, agents[j].hash,
+                                                sizeof(tickets[t].assignee) - 1);
+                                        break;
+                                    }
+                                }
+                                char rework_log[256];
+                                snprintf(rework_log, sizeof(rework_log),
+                                         "[review] Rework: re-assigned ticket back to %s (%s)",
+                                         agents[j].name, agents[j].role);
+                                log_message(rework_log);
+                                break;
+                            }
+                        }
                     }
 
                     // Log the outcome to the ticket's wiki page so it's visible in Fossil web.
