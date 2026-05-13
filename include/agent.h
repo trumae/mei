@@ -27,6 +27,7 @@ typedef struct {
     char current_ticket[64];
     int resolving_block;
     int doing_review;
+    char pending_review_ticket[64]; // ticket submitted for review; empty when none pending
 } Agent;
 
 #define MAX_AGENTS 10

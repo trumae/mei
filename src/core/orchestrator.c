@@ -168,6 +168,24 @@ void orchestrator_tick(Agent *agents, int agent_count) {
         a->step_count = (ticket_steps[i] > 0) ? ticket_steps[i] : 0;
 
         if (a->state == AGENT_STATE_OPEN) {
+            // Clear pending_review_ticket once the reviewer has finished (Done, Rework,
+            // Closed, or any status other than Review means the cycle ended).
+            if (a->pending_review_ticket[0] != '\0') {
+                for (int t = 0; t < tkt_count; t++) {
+                    if (strcmp(tickets[t].tkt_uuid, a->pending_review_ticket) == 0) {
+                        if (strcasecmp(tickets[t].status, "Review") != 0) {
+                            char pr_log[256];
+                            snprintf(pr_log, sizeof(pr_log),
+                                     "[review-gate] %s: review resolved (%s), agent unblocked",
+                                     a->name, tickets[t].status);
+                            log_message(pr_log);
+                            a->pending_review_ticket[0] = '\0';
+                        }
+                        break;
+                    }
+                }
+            }
+
             // Role-based ticket routing:
             //   planner  → picks up Open unassigned tickets
             //   coder    → picks up Planned or Rework tickets delegated to them
@@ -209,6 +227,13 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // Also accept re-opened sub-tickets (user manually reset to Open)
                     // Also accept Review tickets when explicitly delegated by planner.
                     role_accepts = is_delegated && (tkt_planned || tkt_rework || tkt_review || (tkt_open && is_subtask));
+                    // Review gate: don't pick up new work while a prior submission is still
+                    // under review. Exception: the same ticket returned as Rework (the coder
+                    // must be able to act on reviewer feedback for its own submission).
+                    if (role_accepts && a->pending_review_ticket[0] != '\0') {
+                        int is_own_rework = (strcmp(tickets[t].tkt_uuid, a->pending_review_ticket) == 0);
+                        if (!is_own_rework) role_accepts = 0;
+                    }
                 } else if (strcmp(a->role, "reviewer") == 0) {
                     // Two paths for a reviewer:
                     // 1. Any Review-status ticket not assigned to another known agent
@@ -345,6 +370,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                 break;
                             }
                         }
+                        // Track the pending review so the agent won't accept new work
+                        // until this review cycle completes (Done or Rework).
+                        strncpy(a->pending_review_ticket, a->current_ticket,
+                                sizeof(a->pending_review_ticket) - 1);
+                        a->pending_review_ticket[sizeof(a->pending_review_ticket) - 1] = '\0';
                         log_message("[review] Cleared assignee — ticket submitted for review");
                     }
 
@@ -461,10 +491,14 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     }
 
                     // Point 5: collect next-role hashes AND build agent roster for planner.
+                    // Also build the pending-reviews summary so the planner can sequence
+                    // work knowing which agents are waiting for review to complete.
                     char coder_hash[128]    = {0};
                     char reviewer_hash[128] = {0};
                     static char agent_roster[MEI_TEXT_BUFFER_SIZE];
+                    static char pending_reviews_ctx[4096];
                     memset(agent_roster, 0, sizeof(agent_roster));
+                    memset(pending_reviews_ctx, 0, sizeof(pending_reviews_ctx));
                     for (int j = 0; j < agent_count; j++) {
                         if (strcmp(agents[j].role, "coder") == 0 && !coder_hash[0])
                             strncpy(coder_hash, agents[j].hash, sizeof(coder_hash) - 1);
@@ -491,7 +525,31 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  desc_preview);
                         strncat(agent_roster, entry,
                                 sizeof(agent_roster) - strlen(agent_roster) - 1);
+
+                        if (agents[j].pending_review_ticket[0] != '\0') {
+                            const char *rev_title  = "(unknown)";
+                            const char *rev_status = "Review";
+                            for (int t2 = 0; t2 < tkt_count; t2++) {
+                                if (strcmp(tickets[t2].tkt_uuid,
+                                           agents[j].pending_review_ticket) == 0) {
+                                    rev_title  = tickets[t2].title;
+                                    rev_status = tickets[t2].status;
+                                    break;
+                                }
+                            }
+                            char pr_entry[512];
+                            snprintf(pr_entry, sizeof(pr_entry),
+                                     "  %s (%s): ticket %.10s (\"%s\") — status: %s\n"
+                                     "    → blocked from new assignments until review resolves\n",
+                                     agents[j].name, agents[j].role,
+                                     agents[j].pending_review_ticket, rev_title, rev_status);
+                            strncat(pending_reviews_ctx, pr_entry,
+                                    sizeof(pending_reviews_ctx) - strlen(pending_reviews_ctx) - 1);
+                        }
                     }
+                    if (!pending_reviews_ctx[0])
+                        strncpy(pending_reviews_ctx, "  (none — all agents free to accept new work)\n",
+                                sizeof(pending_reviews_ctx) - 1);
 
                     // Point 2/3: collect sub-tickets (comment contains [parent:<uuid>])
                     // and dependency references ([depends:<uuid>]) for richer context.
@@ -722,11 +780,13 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== BLOCKED TICKET ===\n%s\n\n"
                                  "=== DISCUSSION HISTORY (find the blocker here) ===\n%s\n\n"
                                  "=== PARENT TICKET CONTEXT ===\n%s\n"
+                                 "=== PENDING REVIEWS ===\n%s\n"
                                  "=== RESOLUTION TASK (PLANNER) ===\n%s",
                                  persona_section,
                                  tkt_full,
                                  discussion_log[0] ? discussion_log : "  (no history recorded — check ticket changelog)\n",
                                  parent_ctx[0] ? parent_ctx : "  (none)\n",
+                                 pending_reviews_ctx,
                                  planner_task);
                         strcpy(pmsg.current_state, "Unblocking");
                         strcpy(pmsg.next_action,
@@ -740,6 +800,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "=== DISCUSSION HISTORY ===\n%s\n\n"
                                  "=== PARENT TICKET CONTEXT ===\n%s\n"
                                  "=== AVAILABLE AGENTS ===\n%s\n"
+                                 "=== PENDING REVIEWS ===\n%s\n"
                                  "=== EXISTING SUB-TICKETS (if any) ===\n%s\n"
                                  "=== YOUR TASK (PLANNER) ===\n"
                                  "%s",
@@ -748,6 +809,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  discussion_log[0] ? discussion_log : "  (no history yet)\n",
                                  parent_ctx[0] ? parent_ctx : "  (none — this is a top-level ticket)\n",
                                  agent_roster,
+                                 pending_reviews_ctx,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
                                  planner_task);
                         strcpy(pmsg.current_state, "Planning");
