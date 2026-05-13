@@ -168,15 +168,20 @@ void orchestrator_tick(Agent *agents, int agent_count) {
         a->step_count = (ticket_steps[i] > 0) ? ticket_steps[i] : 0;
 
         if (a->state == AGENT_STATE_OPEN) {
-            // Clear pending_review_ticket once the reviewer has finished (Done, Rework,
-            // Closed, or any status other than Review means the cycle ended).
+            // Clear pending_review_ticket only when the review cycle has ended:
+            // Done (approved), Rework (rejected), Planned (planner unblocked), or closed.
+            // "In Progress" means the reviewer is actively working — keep the gate.
             if (a->pending_review_ticket[0] != '\0') {
                 for (int t = 0; t < tkt_count; t++) {
                     if (strcmp(tickets[t].tkt_uuid, a->pending_review_ticket) == 0) {
-                        if (strcasecmp(tickets[t].status, "Review") != 0) {
+                        int cycle_ended = (strcasecmp(tickets[t].status, "Done")    == 0 ||
+                                           strcasecmp(tickets[t].status, "Rework")  == 0 ||
+                                           strcasecmp(tickets[t].status, "closed")  == 0 ||
+                                           strcasecmp(tickets[t].status, "Planned") == 0);
+                        if (cycle_ended) {
                             char pr_log[256];
                             snprintf(pr_log, sizeof(pr_log),
-                                     "[review-gate] %s: review resolved (%s), agent unblocked",
+                                     "[review-gate] %s: review cycle ended (%s), agent unblocked",
                                      a->name, tickets[t].status);
                             log_message(pr_log);
                             a->pending_review_ticket[0] = '\0';
