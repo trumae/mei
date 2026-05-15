@@ -10,11 +10,11 @@
 #define MAX_LOG_MESSAGES 200
 
 // Color pair IDs
-#define CP_SELECTED  1   // white on blue  — highlighted agent row
+#define CP_SELECTED  1   // white on blue  — highlighted row
 #define CP_OK        2   // green          — IN_PROGRESS, [done], [ok]
 #define CP_ERROR     3   // red            — BLOCKED, OFFLINE, [!]
 #define CP_WARN      4   // yellow         — PAUSED, [sync], [init], [wait]
-#define CP_PULSE     5   // cyan           — [PULSE]
+#define CP_PULSE     5   // cyan           — [PULSE], Planned
 #define CP_HEADER    6   // black on cyan  — header bar and status bar
 #define CP_REVIEW    7   // magenta        — REVIEW state
 
@@ -24,18 +24,18 @@ static WINDOW *win_details = NULL;
 static WINDOW *win_log     = NULL;
 static WINDOW *win_status  = NULL;
 
-static int ui_ready = 0;  // 0 = splash mode, 1 = main layout active
+static int ui_ready = 0;
 
 typedef struct {
     char text[256];
-    char timestamp[10];  // "HH:MM:SS\0"
+    char timestamp[10];
 } LogEntry;
 
 static LogEntry log_messages[MAX_LOG_MESSAGES];
 static int log_count = 0;
 
 // ──────────────────────────────────────────────
-// Helpers
+// State symbol / color helpers — agents
 // ──────────────────────────────────────────────
 
 static const char *state_symbol(AgentState state) {
@@ -61,6 +61,35 @@ static int state_color(AgentState state) {
     }
 }
 
+// ──────────────────────────────────────────────
+// State symbol / color helpers — tickets
+// ──────────────────────────────────────────────
+
+static const char *ticket_symbol(const char *status) {
+    if (!status) return " ";
+    if (strcmp(status, "In Progress") == 0) return "*";
+    if (strcmp(status, "Blocked")     == 0) return "!";
+    if (strcmp(status, "Review")      == 0) return "?";
+    if (strcmp(status, "Rework")      == 0) return "~";
+    if (strcmp(status, "Planned")     == 0) return "P";
+    if (strcmp(status, "Done")        == 0) return "+";
+    return " ";
+}
+
+static int ticket_color(const char *status) {
+    if (!status) return 0;
+    if (strcmp(status, "In Progress") == 0) return CP_OK;
+    if (strcmp(status, "Blocked")     == 0) return CP_ERROR;
+    if (strcmp(status, "Review")      == 0) return CP_REVIEW;
+    if (strcmp(status, "Rework")      == 0) return CP_WARN;
+    if (strcmp(status, "Planned")     == 0) return CP_PULSE;
+    return 0;
+}
+
+// ──────────────────────────────────────────────
+// Log color
+// ──────────────────────────────────────────────
+
 static int log_color(const char *text) {
     if (strstr(text, "[!]")    || strstr(text, "BLOCKED") || strstr(text, "FAILED"))
         return CP_ERROR;
@@ -74,6 +103,10 @@ static int log_color(const char *text) {
     return 0;
 }
 
+// ──────────────────────────────────────────────
+// Box drawing
+// ──────────────────────────────────────────────
+
 static void draw_titled_box(WINDOW *win, const char *title) {
     box(win, 0, 0);
     if (title) {
@@ -84,10 +117,120 @@ static void draw_titled_box(WINDOW *win, const char *title) {
 }
 
 // ──────────────────────────────────────────────
+// Word-wrap printer — returns rows used
+// ──────────────────────────────────────────────
+
+static int draw_wrapped(WINDOW *win, int start_row, int col, int max_w, int max_rows,
+                        const char *text) {
+    if (!text || !*text || max_rows <= 0 || max_w <= 0) return 0;
+    int row = 0;
+    const char *p = text;
+    while (*p && row < max_rows) {
+        const char *nl = strchr(p, '\n');
+        int seg_len = nl ? (int)(nl - p) : (int)strlen(p);
+        if (seg_len == 0) {
+            row++;
+            if (nl) p = nl + 1;
+            else break;
+            continue;
+        }
+        while (seg_len > 0 && row < max_rows) {
+            int chunk = (seg_len > max_w) ? max_w : seg_len;
+            mvwprintw(win, start_row + row, col, "%.*s", chunk, p);
+            p += chunk;
+            seg_len -= chunk;
+            row++;
+        }
+        if (nl) p = nl + 1;
+        else break;
+    }
+    return row;
+}
+
+// ──────────────────────────────────────────────
+// Shared header (tabs + stats)
+// ──────────────────────────────────────────────
+
+static void draw_header(int x_max, Agent *agents, int agent_count, ActiveScreen screen) {
+    int active = 0;
+    for (int i = 0; i < agent_count; i++)
+        if (agents[i].state == AGENT_STATE_IN_PROGRESS) active++;
+
+    time_t now = time(NULL);
+    struct tm *tn = localtime(&now);
+
+    wattron(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
+    mvwhline(win_header, 0, 0, ' ', x_max);
+
+    // App name
+    mvwprintw(win_header, 0, 1, "MEI %s", MEI_VERSION_FULL);
+
+    // Tabs
+    static const char *tab_names[SCREEN_COUNT] = {"Agents", "Tickets"};
+    int cx = 1 + 4 + (int)strlen(MEI_VERSION_FULL) + 2;
+    for (int s = 0; s < SCREEN_COUNT; s++) {
+        wmove(win_header, 0, cx);
+        if (s == (int)screen) {
+            wattron(win_header, A_REVERSE);
+            wprintw(win_header, " %d:%s ", s + 1, tab_names[s]);
+            wattroff(win_header, A_REVERSE);
+        } else {
+            wattroff(win_header, A_BOLD);
+            wprintw(win_header, " %d:%s ", s + 1, tab_names[s]);
+            wattron(win_header, A_BOLD);
+        }
+        cx += (int)strlen(tab_names[s]) + 4;
+    }
+
+    // Right-aligned stats
+    char stats[80];
+    snprintf(stats, sizeof(stats), "%d agent%s  %d active  %02d:%02d:%02d",
+             agent_count, agent_count == 1 ? "" : "s",
+             active, tn->tm_hour, tn->tm_min, tn->tm_sec);
+    mvwprintw(win_header, 0, x_max - (int)strlen(stats) - 1, "%s", stats);
+    wattroff(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
+}
+
+// ──────────────────────────────────────────────
+// Shared log panel
+// ──────────────────────────────────────────────
+
+static void draw_log_panel(void) {
+    draw_titled_box(win_log, "System Log");
+    int lh, lw;
+    getmaxyx(win_log, lh, lw);
+    int visible = lh - 2;
+    int start = (log_count > visible) ? log_count - visible : 0;
+    for (int i = 0; i < visible && (start + i) < log_count; i++) {
+        LogEntry *e = &log_messages[start + i];
+        int cp = log_color(e->text);
+        wattron(win_log, A_DIM);
+        mvwprintw(win_log, i + 1, 2, "[%s] ", e->timestamp);
+        wattroff(win_log, A_DIM);
+        int msg_max = lw - 14;
+        if (msg_max < 10) msg_max = 10;
+        if (cp) wattron(win_log, COLOR_PAIR(cp));
+        wprintw(win_log, "%.*s", msg_max, e->text);
+        if (cp) wattroff(win_log, COLOR_PAIR(cp));
+    }
+}
+
+// ──────────────────────────────────────────────
+// Shared status bar
+// ──────────────────────────────────────────────
+
+static void draw_status_bar(int x_max, const char *hints) {
+    wattron(win_status, COLOR_PAIR(CP_HEADER));
+    mvwhline(win_status, 0, 0, ' ', x_max);
+    mvwprintw(win_status, 0, 2, "%s", hints);
+    wattroff(win_status, COLOR_PAIR(CP_HEADER));
+}
+
+// ──────────────────────────────────────────────
 // Lifecycle
 // ──────────────────────────────────────────────
 
-void init_ui() {
+void init_ui(void) {
     initscr();
     cbreak();
     noecho();
@@ -104,7 +247,6 @@ void init_ui() {
         init_pair(CP_HEADER,   COLOR_BLACK,   COLOR_CYAN);
         init_pair(CP_REVIEW,   COLOR_MAGENTA, COLOR_BLACK);
     }
-    // Windows are created in ui_set_ready() after init completes.
 }
 
 void draw_splash(const char *msg) {
@@ -123,7 +265,6 @@ void draw_splash(const char *msg) {
     if (by < 0) by = 0;
     if (bx < 0) bx = 0;
 
-    // Box border (cyan/bold)
     if (has_colors()) attron(COLOR_PAIR(CP_HEADER) | A_BOLD);
     mvaddch(by,           bx,           ACS_ULCORNER);
     mvaddch(by,           bx + box_w-1, ACS_URCORNER);
@@ -135,17 +276,14 @@ void draw_splash(const char *msg) {
     mvvline(by + 1,       bx + box_w-1, ACS_VLINE, box_h - 2);
     if (has_colors()) attroff(COLOR_PAIR(CP_HEADER) | A_BOLD);
 
-    // Title and version centered inside box
     attron(A_BOLD);
     mvprintw(by + 2, (cols - tlen) / 2, "%s", title);
     attroff(A_BOLD);
     mvprintw(by + 3, (cols - vlen) / 2, "%s", MEI_VERSION_FULL);
 
-    // "Initializing..." label below box
     const char *label = "Initializing...";
     mvprintw(by + box_h + 1, (cols - (int)strlen(label)) / 2, "%s", label);
 
-    // Last log message as progress indicator
     if (msg && msg[0]) {
         int max_msg = cols - 6;
         if (max_msg < 10) max_msg = 10;
@@ -181,7 +319,7 @@ void ui_set_ready(void) {
     refresh();
 }
 
-void destroy_ui() {
+void destroy_ui(void) {
     if (win_header)  delwin(win_header);
     if (win_list)    delwin(win_list);
     if (win_details) delwin(win_details);
@@ -194,7 +332,7 @@ void destroy_ui() {
 // Logging
 // ──────────────────────────────────────────────
 
-#define MEI_LOG_MAX_BYTES 524288  /* 512 KB – rotate when exceeded */
+#define MEI_LOG_MAX_BYTES 524288
 
 void log_message(const char *msg) {
     time_t now = time(NULL);
@@ -213,12 +351,10 @@ void log_message(const char *msg) {
     snprintf(entry->timestamp, sizeof(entry->timestamp),
              "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
 
-    // During init: update the splash with the latest message.
     if (!ui_ready) {
         draw_splash(msg);
     }
 
-    // File sink with rotation
     FILE *f = fopen("/tmp/mei.log", "a");
     if (!f) return;
     fseek(f, 0, SEEK_END);
@@ -233,10 +369,11 @@ void log_message(const char *msg) {
 }
 
 // ──────────────────────────────────────────────
-// Main layout
+// Screen 1: Agents
 // ──────────────────────────────────────────────
 
-void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
+void draw_main_screen(Agent *agents, int agent_count, int selected_agent,
+                      ActiveScreen active_screen) {
     int y_max, x_max;
     getmaxyx(stdscr, y_max, x_max);
     (void)y_max;
@@ -247,25 +384,7 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
     werase(win_log);
     werase(win_status);
 
-    // ── Header bar ───────────────────────────────
-    {
-        int active = 0;
-        for (int i = 0; i < agent_count; i++)
-            if (agents[i].state == AGENT_STATE_IN_PROGRESS) active++;
-
-        time_t now = time(NULL);
-        struct tm *tn = localtime(&now);
-
-        wattron(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
-        mvwhline(win_header, 0, 0, ' ', x_max);
-        mvwprintw(win_header, 0, 2,
-                  "MEI %s   %d agent%s   %d in-progress   %02d:%02d:%02d",
-                  MEI_VERSION_FULL,
-                  agent_count, agent_count == 1 ? "" : "s",
-                  active,
-                  tn->tm_hour, tn->tm_min, tn->tm_sec);
-        wattroff(win_header, COLOR_PAIR(CP_HEADER) | A_BOLD);
-    }
+    draw_header(x_max, agents, agent_count, active_screen);
 
     // ── Agent list ───────────────────────────────
     draw_titled_box(win_list, "Agents");
@@ -302,7 +421,7 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
     }
 
     // ── Details panel ───────────────────────────
-    draw_titled_box(win_details, "Details");
+    draw_titled_box(win_details, "Agent Details");
     if (selected_agent >= 0 && selected_agent < agent_count) {
         Agent *a = &agents[selected_agent];
         int dh, dw;
@@ -356,7 +475,7 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
             mvwprintw(win_details, row++, 2, "%-12s %ds ago", "Heartbeat:", a->last_heartbeat);
         }
 
-        row++;  // blank separator
+        row++;
 
         mvwprintw(win_details, row++, 2, "%-12s %s", "CLI:", a->cli);
         if (a->cmd[0]) {
@@ -372,38 +491,177 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent) {
         mvwprintw(win_details, row, 2, "%-12s /tmp/workspaces/%s", "Workspace:", a->name);
     }
 
-    // ── Log panel ───────────────────────────────
-    draw_titled_box(win_log, "System Log");
+    draw_log_panel();
+    draw_status_bar(x_max,
+        "q:quit  Tab:screens  \xe2\x86\x91\xe2\x86\x93:select  "
+        "a:attach  p:pause  r:resume  k:kill");
+
+    wnoutrefresh(win_header);
+    wnoutrefresh(win_list);
+    wnoutrefresh(win_details);
+    wnoutrefresh(win_log);
+    wnoutrefresh(win_status);
+    doupdate();
+}
+
+// ──────────────────────────────────────────────
+// Screen 2: Tickets
+// ──────────────────────────────────────────────
+
+static const char *sort_label(int sort_order) {
+    switch (sort_order) {
+        case TICKET_SORT_TITLE:  return "title";
+        case TICKET_SORT_ASSIGN: return "assign";
+        default:                 return "status";
+    }
+}
+
+void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
+                         int sort_order, Agent *agents, int agent_count) {
+    int y_max, x_max;
+    getmaxyx(stdscr, y_max, x_max);
+    (void)y_max;
+
+    werase(win_header);
+    werase(win_list);
+    werase(win_details);
+    werase(win_log);
+    werase(win_status);
+
+    draw_header(x_max, agents, agent_count, SCREEN_TICKETS);
+
+    // ── Ticket list ─────────────────────────────
+    {
+        char list_title[64];
+        snprintf(list_title, sizeof(list_title), "Tickets [%d]  sort:%s",
+                 count, sort_label(sort_order));
+        draw_titled_box(win_list, list_title);
+    }
+
     {
         int lh, lw;
-        getmaxyx(win_log, lh, lw);
-        int visible = lh - 2;
+        getmaxyx(win_list, lh, lw);
+        int usable_w = lw - 4;   // inner width (minus borders + indent)
+        int sym_w    = 4;        // " [X] "
+        int title_w  = usable_w - sym_w;
+        if (title_w < 6) title_w = 6;
 
-        int start = (log_count > visible) ? log_count - visible : 0;
-        for (int i = 0; i < visible && (start + i) < log_count; i++) {
-            LogEntry *e = &log_messages[start + i];
-            int cp = log_color(e->text);
+        // Scroll offset: keep selected row visible
+        int visible_rows = lh - 3;
+        int scroll = 0;
+        if (selected >= visible_rows) scroll = selected - visible_rows + 1;
 
-            wattron(win_log, A_DIM);
-            mvwprintw(win_log, i + 1, 2, "[%s] ", e->timestamp);
-            wattroff(win_log, A_DIM);
+        for (int i = 0; i < visible_rows; i++) {
+            int idx = scroll + i;
+            if (idx >= count) break;
 
-            int msg_max = lw - 14;
-            if (msg_max < 10) msg_max = 10;
-            if (cp) wattron(win_log, COLOR_PAIR(cp));
-            wprintw(win_log, "%.*s", msg_max, e->text);
-            if (cp) wattroff(win_log, COLOR_PAIR(cp));
+            FossilTicket *t  = &tickets[idx];
+            const char   *sym = ticket_symbol(t->status);
+            int           cp  = ticket_color(t->status);
+
+            if (idx == selected) {
+                wattron(win_list, COLOR_PAIR(CP_SELECTED) | A_BOLD);
+                mvwprintw(win_list, i + 1, 1, " [%s] %-*.*s",
+                          sym, title_w, title_w, t->title);
+                wattroff(win_list, COLOR_PAIR(CP_SELECTED) | A_BOLD);
+            } else {
+                if (cp) wattron(win_list, COLOR_PAIR(cp));
+                mvwprintw(win_list, i + 1, 1, " [%s] %-*.*s",
+                          sym, title_w, title_w, t->title);
+                if (cp) wattroff(win_list, COLOR_PAIR(cp));
+            }
+        }
+
+        // Scroll indicator
+        if (count > visible_rows) {
+            wattron(win_list, A_DIM);
+            mvwprintw(win_list, lh - 2, 2, "%d-%d / %d",
+                      scroll + 1, scroll + visible_rows < count ? scroll + visible_rows : count,
+                      count);
+            wattroff(win_list, A_DIM);
         }
     }
 
-    // ── Status bar ──────────────────────────────
-    {
-        wattron(win_status, COLOR_PAIR(CP_HEADER));
-        mvwhline(win_status, 0, 0, ' ', x_max);
-        mvwprintw(win_status, 0, 2,
-                  "q:quit   a:attach   p:pause   r:resume   k:kill   ↑↓:navigate");
-        wattroff(win_status, COLOR_PAIR(CP_HEADER));
+    // ── Ticket details ──────────────────────────
+    draw_titled_box(win_details, "Ticket Details");
+    if (count == 0) {
+        wattron(win_details, A_DIM);
+        mvwprintw(win_details, 2, 3, "No active tickets.");
+        wattroff(win_details, A_DIM);
+    } else if (selected >= 0 && selected < count) {
+        FossilTicket *t = &tickets[selected];
+        int dh, dw;
+        getmaxyx(win_details, dh, dw);
+        int text_w = dw - 4;
+
+        int row = 1;
+
+        // UUID (short)
+        wattron(win_details, A_DIM);
+        mvwprintw(win_details, row++, 2, "%.32s", t->tkt_uuid);
+        wattroff(win_details, A_DIM);
+
+        row++;  // blank
+
+        // Title
+        wattron(win_details, A_BOLD);
+        row += draw_wrapped(win_details, row, 2, text_w, 3, t->title);
+        wattroff(win_details, A_BOLD);
+
+        row++;  // blank
+
+        // Status with color
+        {
+            int cp = ticket_color(t->status);
+            mvwprintw(win_details, row, 2, "%-10s ", "Status:");
+            if (cp) wattron(win_details, COLOR_PAIR(cp) | A_BOLD);
+            wprintw(win_details, "%s", t->status);
+            if (cp) wattroff(win_details, COLOR_PAIR(cp) | A_BOLD);
+            row++;
+        }
+
+        // Assignee
+        if (t->assignee[0]) {
+            mvwprintw(win_details, row++, 2, "%-10s %.*s", "Assignee:", text_w - 10, t->assignee);
+        }
+
+        row++;  // blank
+
+        // Separator + description
+        if (t->comment[0]) {
+            wattron(win_details, A_DIM);
+            mvwhline(win_details, row, 2, ACS_HLINE, text_w);
+            mvwprintw(win_details, row, 3, " Description ");
+            wattroff(win_details, A_DIM);
+            row++;
+
+            int desc_rows = dh - row - (t->reviewer_notes[0] ? 5 : 2);
+            if (desc_rows < 1) desc_rows = 1;
+            if (desc_rows > dh - row - 1) desc_rows = dh - row - 1;
+            row += draw_wrapped(win_details, row, 2, text_w, desc_rows, t->comment);
+        }
+
+        // Reviewer notes
+        if (t->reviewer_notes[0] && row < dh - 3) {
+            row++;
+            wattron(win_details, A_DIM);
+            mvwhline(win_details, row, 2, ACS_HLINE, text_w);
+            mvwprintw(win_details, row, 3, " Reviewer Notes ");
+            wattroff(win_details, A_DIM);
+            row++;
+
+            int notes_rows = dh - row - 1;
+            if (notes_rows < 1) notes_rows = 1;
+            wattron(win_details, COLOR_PAIR(CP_WARN));
+            draw_wrapped(win_details, row, 2, text_w, notes_rows, t->reviewer_notes);
+            wattroff(win_details, COLOR_PAIR(CP_WARN));
+        }
     }
+
+    draw_log_panel();
+    draw_status_bar(x_max,
+        "q:quit  Tab:screens  \xe2\x86\x91\xe2\x86\x93:select  "
+        "s:next-status  S:prev-status  o:sort  r:reload");
 
     wnoutrefresh(win_header);
     wnoutrefresh(win_list);

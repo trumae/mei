@@ -28,6 +28,14 @@ C99 multi-agent orchestrator using **Fossil SCM** as the single source of truth 
 - Assignee → `private_contact` field
 - States: `AGENT_STATE_OPEN`, `AGENT_STATE_IN_PROGRESS`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_PAUSED`
 - Step limit: `MAX_STEPS_PER_TICKET` = 50 (prevents infinite agent loops)
+- Intent flags on Agent struct: `resolving_block` (handling Blocked), `doing_review` (non-reviewer executing a planner-assigned review task)
+- `deps_satisfied` treats both `"Done"` and `"closed"` as terminal — agents sometimes set ticket status to `"closed"` instead of `"Done"`
+
+## Review Routing
+- Any role (coder, researcher, etc.) accepts a `Review`-status ticket when `is_delegated` (planner explicitly assigned it).
+- When a non-reviewer agent finishes and sets its ticket to `Review` (normal work submission), the orchestrator clears `private_contact` so the reviewer picks it up as an unassigned ticket.
+- Reviewer only picks up Review tickets that are unassigned or directly delegated to it; if any known agent is assignee, reviewer skips.
+- Non-reviewer acting as reviewer receives the same PULSE template as the reviewer role (`a->doing_review` triggers this).
 
 ## Agent Decision & Unblocking Protocol
 Executor agents (coder, reviewer, researcher) receive a **DECISION PROTOCOL** section in every

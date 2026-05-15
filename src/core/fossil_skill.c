@@ -62,6 +62,17 @@ int fossil_ticket_list(char *buffer, size_t max_size) {
     return total_read;
 }
 
+static int is_valid_fossil_uuid(const char *s) {
+    if (!s) return 0;
+    size_t len = strlen(s);
+    if (len < 10 || len > 64) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
 int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     if (!global_repo_path[0]) return 0;
 
@@ -113,7 +124,7 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
         char *comment        = fields[4];
         char *reviewer_notes = fields[5];
 
-        if (uuid && strlen(uuid) >= 10) {
+        if (is_valid_fossil_uuid(uuid)) {
             strncpy(tickets[count].tkt_uuid,        uuid,           sizeof(tickets[count].tkt_uuid) - 1);
             strncpy(tickets[count].title,            title          ? title          : "", sizeof(tickets[count].title) - 1);
             strncpy(tickets[count].status,           status         ? status         : "Open", sizeof(tickets[count].status) - 1);
@@ -121,6 +132,12 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
             strncpy(tickets[count].comment,          comment        ? comment        : "", sizeof(tickets[count].comment) - 1);
             strncpy(tickets[count].reviewer_notes,   reviewer_notes ? reviewer_notes : "", sizeof(tickets[count].reviewer_notes) - 1);
             count++;
+        } else if (uuid && uuid[0] != '\0') {
+            FILE *err = fopen("/tmp/fossil_err.log", "a");
+            if (err) {
+                fprintf(err, "[fossil_ticket_list_parsed] rejected malformed uuid: %.80s\n", uuid);
+                fclose(err);
+            }
         }
     }
 
