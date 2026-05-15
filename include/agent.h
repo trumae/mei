@@ -27,6 +27,8 @@ typedef struct {
     char current_ticket[64];
     int resolving_block;
     int doing_review;
+    int doing_qa;
+    int doing_phase2;
     char pending_review_ticket[64]; // ticket submitted for review; empty when none pending
 } Agent;
 

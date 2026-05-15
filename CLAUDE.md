@@ -28,8 +28,23 @@ C99 multi-agent orchestrator using **Fossil SCM** as the single source of truth 
 - Assignee → `private_contact` field
 - States: `AGENT_STATE_OPEN`, `AGENT_STATE_IN_PROGRESS`, `AGENT_STATE_BLOCKED`, `AGENT_STATE_PAUSED`
 - Step limit: `MAX_STEPS_PER_TICKET` = 50 (prevents infinite agent loops)
-- Intent flags on Agent struct: `resolving_block` (handling Blocked), `doing_review` (non-reviewer executing a planner-assigned review task)
+- Intent flags on Agent struct: `resolving_block` (handling Blocked), `doing_review` (non-reviewer executing a planner-assigned review task), `doing_qa` (planner running quality assessment)
 - `deps_satisfied` treats both `"Done"` and `"closed"` as terminal — agents sometimes set ticket status to `"closed"` instead of `"Done"`
+- Intent flag `doing_phase2`: set when planner picks up a `"Verified"` ticket (human approved plan).
+
+## Parent Ticket Lifecycle (Plan Approval + QA Loop)
+Top-level tickets go through these statuses:
+
+1. `Open` (user-created) → planner picks up → **Phase 1**: writes proposed plan into ticket `comment` field (human-editable in Fossil web UI), sets status to `"Pending Approval"`. No agent picks up `"Pending Approval"` tickets.
+2. Human reviews plan in Fossil web UI. Two outcomes:
+   - **Approve**: set status → `"Verified"` → planner picks up, creates sub-tickets (Phase 2), sets parent to `"Delegated"`.
+   - **Request changes**: set status back to `"Open"` → planner re-plans (Phase 1 again).
+3. **Phase 2** (`Verified`): planner creates sub-tickets as planned, sets parent to `"Delegated"`.
+5. Sub-tickets are worked on by executor agents and reviewed by reviewer (set to `"Done"`).
+6. Orchestrator QA monitoring loop (`orchestrator_tick` post-agent section): when ALL sub-tickets of a `"Delegated"` parent are `"Done"`, promotes parent to `"QA Ready"`.
+7. `"QA Ready"` → planner picks up (`a->doing_qa = 1`) → evaluates overall quality:
+   - If satisfactory: `fossil ticket set <parent> status "Done"` (task closed).
+   - If not: creates fix sub-tickets, sets parent back to `"Delegated"` → loop restarts at step 6.
 
 ## Review Routing
 - Any role (coder, researcher, etc.) accepts a `Review`-status ticket when `is_delegated` (planner explicitly assigned it).
@@ -44,7 +59,7 @@ They escalate to `BLOCKED` only for genuine architectural blockers (scope confli
 external credentials) — not for ordinary ambiguity.
 
 When a ticket is set to `Blocked`, the planner picks it up automatically:
-1. **Planner routing** (`orchestrator.c:role_accepts`): planner accepts `Open` (non-sub-task) OR
+1. **Planner routing** (`orchestrator.c:role_accepts`): planner accepts `Open` (non-sub-task), `Verified` (non-sub-task), OR
    any `Blocked` ticket. The flag `Agent.resolving_block` carries this intent to the PULSE phase.
 2. **Planner PULSE** (`orchestrator.c` IN_PROGRESS build): if `resolving_block`, sends
    `"Resolve Blocked Ticket"` intent instead of the normal decomposition task. Task instructs the

@@ -39,6 +39,9 @@ bool fossil_ticket_assign(const char *ticket_id, const char *agent_name);
 // Update ticket status
 bool fossil_ticket_set_status(const char *ticket_id, const char *status);
 
+// Update the reviewer_notes field on a ticket (used for plan approval markers)
+bool fossil_ticket_set_reviewer_notes(const char *ticket_id, const char *notes);
+
 // Commit changes in a specific workspace
 bool fossil_commit(const char *workspace, const char *message);
 
@@ -60,5 +63,16 @@ int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_
 // Fossil web UI stores the initial description as "J icomment" in the artifact
 // instead of the ticket table's comment column. Returns bytes written, 0 on failure.
 int fossil_ticket_read_icomment_from_artifact(const char *ticket_id, char *buffer, size_t max_size);
+
+// Read the full change history for a ticket via `fossil ticket history`.
+// Includes all human remarks (icomment changes) and field changes.
+// Returns bytes written, 0 on failure.
+int fossil_ticket_read_history(const char *ticket_id, char *buffer, size_t max_size);
+
+// Extract only the icomment (human remarks typed in the Fossil web UI) entries
+// from the ticket history.  Much smaller than the full history — always fits in
+// the PULSE regardless of how long the history has grown.
+// Returns bytes written, 0 on failure.
+int fossil_ticket_read_human_remarks(const char *ticket_id, char *buffer, size_t max_size);
 
 #endif // FOSSIL_SKILL_H

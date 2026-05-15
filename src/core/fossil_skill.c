@@ -86,12 +86,15 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     system(ensure_cols);
 
     char cmd[2048];
+    // Use char(1) (SOH) as a newline placeholder so multi-line comment/reviewer_notes
+    // fields don't break the line-by-line fgets parser.  We restore \n after parsing.
     snprintf(cmd, sizeof(cmd),
              "printf \".mode list\\n"
              "PRAGMA busy_timeout = 5000;\\n"
              "SELECT tkt_uuid || '|' || coalesce(title,'') || '|' || "
              "coalesce(status,'') || '|' || coalesce(private_contact,'') || '|' || "
-             "coalesce(comment,'') || '|' || coalesce(reviewer_notes,'') "
+             "replace(replace(coalesce(comment,''),char(10),char(1)),char(13),'') || '|' || "
+             "replace(replace(coalesce(reviewer_notes,''),char(10),char(1)),char(13),'') "
              "FROM ticket WHERE status != 'Closed' AND status != 'done';\\n\" "
              "| fossil sqlite -R %s 2>/dev/null",
              global_repo_path);
@@ -129,8 +132,14 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
             strncpy(tickets[count].title,            title          ? title          : "", sizeof(tickets[count].title) - 1);
             strncpy(tickets[count].status,           status         ? status         : "Open", sizeof(tickets[count].status) - 1);
             strncpy(tickets[count].assignee,         assignee       ? assignee       : "", sizeof(tickets[count].assignee) - 1);
-            strncpy(tickets[count].comment,          comment        ? comment        : "", sizeof(tickets[count].comment) - 1);
-            strncpy(tickets[count].reviewer_notes,   reviewer_notes ? reviewer_notes : "", sizeof(tickets[count].reviewer_notes) - 1);
+            // Restore newlines from the SOH placeholder used in the SQL query
+            char *f;
+            f = tickets[count].comment;
+            strncpy(f, comment ? comment : "", sizeof(tickets[count].comment) - 1);
+            for (char *p = f; *p; p++) if ((unsigned char)*p == 1) *p = '\n';
+            f = tickets[count].reviewer_notes;
+            strncpy(f, reviewer_notes ? reviewer_notes : "", sizeof(tickets[count].reviewer_notes) - 1);
+            for (char *p = f; *p; p++) if ((unsigned char)*p == 1) *p = '\n';
             count++;
         } else if (uuid && uuid[0] != '\0') {
             FILE *err = fopen("/tmp/fossil_err.log", "a");
@@ -202,6 +211,32 @@ bool fossil_ticket_set_status(const char *ticket_id, const char *status) {
              "fossil_ticket_set_status: ticket=%.10s status=%s result=%d",
              ticket_id, status, res);
     log_message(log_msg);
+    return (res == 0);
+}
+
+bool fossil_ticket_set_reviewer_notes(const char *ticket_id, const char *notes) {
+    if (!global_repo_path[0] || !ticket_id || !notes) return false;
+
+    char tmp_sql[64] = "/tmp/mei_sql_XXXXXX";
+    int fd = mkstemp(tmp_sql);
+    if (fd < 0) return false;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(tmp_sql); return false; }
+    fprintf(f, "PRAGMA busy_timeout = 5000;\n");
+    fprintf(f, "UPDATE ticket SET reviewer_notes = '");
+    for (const char *p = notes; *p; p++) {
+        if (*p == '\'') fputc('\'', f);
+        fputc(*p, f);
+    }
+    fprintf(f, "' WHERE tkt_uuid LIKE '%s%%';\n", ticket_id);
+    fclose(f);
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "fossil sqlite -R %s < %s >> /tmp/fossil_err.log 2>&1",
+             global_repo_path, tmp_sql);
+    int res = system(cmd);
+    unlink(tmp_sql);
     return (res == 0);
 }
 
@@ -502,4 +537,46 @@ bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char
 
     unlink(tmp_path);
     return true;
+}
+
+// Read the human-facing change history for a ticket using `fossil ticket history`.
+// Returns bytes written to buffer, 0 on failure.
+int fossil_ticket_read_history(const char *ticket_id, char *buffer, size_t max_size) {
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "fossil ticket history %.40s -R %s 2>/dev/null",
+             ticket_id, global_repo_path);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    size_t total = 0;
+    int c;
+    while (total < max_size - 1 && (c = fgetc(fp)) != EOF)
+        buffer[total++] = (char)c;
+    buffer[total] = '\0';
+    pclose(fp);
+    return (int)total;
+}
+
+// Extract only the human-added icomment entries from ticket history.
+// These are the remarks the human types in the Fossil web UI — they are stored
+// as "Change icomment:" artifacts and are invisible in the ticket's comment column.
+// The full history can be 10KB+; this function returns only the small subset that
+// matters for plan feedback, so it always fits in the PULSE regardless of history size.
+int fossil_ticket_read_human_remarks(const char *ticket_id, char *buffer, size_t max_size) {
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd),
+             "fossil ticket history %.40s -R %s 2>/dev/null"
+             " | grep -B2 -A3 'icomment:'",
+             ticket_id, global_repo_path);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    size_t total = 0;
+    int c;
+    while (total < max_size - 1 && (c = fgetc(fp)) != EOF)
+        buffer[total++] = (char)c;
+    buffer[total] = '\0';
+    pclose(fp);
+    return (int)total;
 }

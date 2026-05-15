@@ -163,10 +163,22 @@ void orchestrator_tick(Agent *agents, int agent_count) {
     tick_counter++;
     int tkt_count = fossil_ticket_list_parsed(tickets, 100);
 
+    // When a "Pending Approval" ticket is routed to the planner again due to the
+    // orchestrator's direct SQL UPDATE racing with the planner's artifact-based status
+    // change, force it back to "Pending Approval" so it waits for human action.
+    for (int t = 0; t < tkt_count; t++) {
+        if (strcasecmp(tickets[t].status, "In Progress") != 0) continue;
+        if (tickets[t].reviewer_notes[0] == '\0') continue;
+        if (strncmp(tickets[t].reviewer_notes, "[PLAN_PENDING]", 14) != 0) continue;
+        fossil_ticket_set_status(tickets[t].tkt_uuid, "Pending Approval");
+        strncpy(tickets[t].status, "Pending Approval", sizeof(tickets[t].status) - 1);
+    }
+
     for (int i = 0; i < agent_count; i++) {
         Agent *a = &agents[i];
         a->step_count = (ticket_steps[i] > 0) ? ticket_steps[i] : 0;
 
+        route_open:
         if (a->state == AGENT_STATE_OPEN) {
             // Clear pending_review_ticket only when the review cycle is truly over.
             // "Done"/"closed" → approved, free to take new work.
@@ -216,19 +228,29 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 }
                 int is_unassigned = (strlen(tickets[t].assignee) == 0) || !assignee_known;
 
-                int tkt_open     = (strcasecmp(tickets[t].status, "Open") == 0 || strlen(tickets[t].status) == 0);
-                int tkt_progress = (strcasecmp(tickets[t].status, "In Progress") == 0);
-                int tkt_planned  = (strcasecmp(tickets[t].status, "Planned") == 0);
-                int tkt_review   = (strcasecmp(tickets[t].status, "Review") == 0);
-                int tkt_rework   = (strcasecmp(tickets[t].status, "Rework") == 0);
-                int tkt_blocked  = (strcasecmp(tickets[t].status, "Blocked") == 0);
+                int tkt_open             = (strcasecmp(tickets[t].status, "Open") == 0 || strlen(tickets[t].status) == 0);
+                int tkt_verified         = (strcasecmp(tickets[t].status, "Verified") == 0);
+                int tkt_progress         = (strcasecmp(tickets[t].status, "In Progress") == 0);
+                int tkt_planned          = (strcasecmp(tickets[t].status, "Planned") == 0);
+                int tkt_review           = (strcasecmp(tickets[t].status, "Review") == 0);
+                int tkt_rework           = (strcasecmp(tickets[t].status, "Rework") == 0);
+                int tkt_blocked          = (strcasecmp(tickets[t].status, "Blocked") == 0);
+                int tkt_pending_approval = (strcasecmp(tickets[t].status, "Pending Approval") == 0);
+                int tkt_qa_ready         = (strcasecmp(tickets[t].status, "QA Ready") == 0);
 
                 int role_accepts = 0;
                 if (strcmp(a->role, "planner") == 0) {
-                    // Planner owns Open tickets (not sub-tasks) and any Blocked ticket
-                    // where an executor got stuck and needs a decision.
+                    // Planner owns:
+                    //   tkt_open     — fresh top-level ticket (Phase 1: write plan)
+                    //   tkt_verified — human approved/edited the plan (Phase 2 or re-plan)
+                    //   tkt_blocked  — executor escalated; planner unblocks
+                    //   tkt_qa_ready — all sub-tasks done; planner runs quality assessment
                     int is_subtask = strstr(tickets[t].comment, "[parent:") != NULL;
-                    role_accepts = (tkt_open && !is_subtask) || tkt_blocked;
+                    (void)tkt_pending_approval;
+                    role_accepts = (tkt_open && !is_subtask) ||
+                                   (tkt_verified && !is_subtask) ||
+                                   tkt_blocked               ||
+                                   tkt_qa_ready;
                 } else if (strcmp(a->role, "coder") == 0) {
                     int is_subtask = (strstr(tickets[t].comment, "[parent:") != NULL);
                     // Also accept re-opened sub-tickets (user manually reset to Open)
@@ -324,6 +346,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 a->state = AGENT_STATE_IN_PROGRESS;
                 a->resolving_block = tkt_blocked;
                 a->doing_review    = tkt_review && (strcmp(a->role, "reviewer") != 0);
+                a->doing_qa        = tkt_qa_ready;
+                a->doing_phase2    = tkt_verified;
                 ticket_steps[i] = -1;
                 warm_up_ticks[i] = 0;
 
@@ -425,13 +449,16 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     fossil_wiki_append_log(a->current_ticket, a->name, wiki_msg);
 
                     a->state = AGENT_STATE_OPEN;
-                    a->doing_review = 0;
+                    a->doing_review  = 0;
+                    a->doing_qa      = 0;
+                    a->doing_phase2  = 0;
                     strcpy(a->current_ticket, "None");
                     ticket_steps[i] = 0;
                     warm_up_ticks[i] = 0;
                     pane_idle_ticks[i] = 0;
                     last_pane_hash[i] = 0;
-                    continue;
+                    // Route immediately in this same tick instead of waiting for the next one.
+                    goto route_open;
                 }
             }
 
@@ -626,15 +653,24 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                             a->current_ticket, tkt_description, sizeof(tkt_description));
                     }
 
-                    char tkt_full[4096];
+                    // Human remarks: icomment entries from the Fossil web UI.
+                    // Extracted separately because the full history can exceed the buffer
+                    // and these entries always appear at the end (oldest first in the raw output
+                    // but the history cmd prints most-recent-first, so they get truncated).
+                    char human_remarks[2048] = {0};
+                    fossil_ticket_read_human_remarks(a->current_ticket, human_remarks, sizeof(human_remarks));
+
+                    char tkt_full[8192];
                     snprintf(tkt_full, sizeof(tkt_full),
                              "uuid:     %s\ntitle:    %s\nstatus:   %s\nassignee: %s\n\n"
                              "--- DESCRIPTION ---\n%s\n\n"
-                             "--- REVIEWER NOTES ---\n%s",
+                             "--- REVIEWER NOTES ---\n%s\n\n"
+                             "--- HUMAN REMARKS (requirements/feedback added via web UI) ---\n%s",
                              tkt_info.tkt_uuid, tkt_info.title, tkt_info.status,
                              tkt_info.assignee,
                              tkt_description[0] ? tkt_description : "(no description in ticket)",
-                             tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none)");
+                             tkt_info.reviewer_notes[0] ? tkt_info.reviewer_notes : "(none)",
+                             human_remarks[0] ? human_remarks : "(none)");
 
                     // Read accumulated discussion history from the ticket's wiki page.
                     char discussion_log[4096] = {0};
@@ -702,8 +738,10 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                              "     rm -f \"$TMP\"",
                              wiki_page, wiki_page, wiki_page);
 
-                    // Build planner task instructions.
-                    char planner_task[2048] = {0};
+                    // Phase detection: a->doing_phase2 is set when the ticket was
+                    // "Verified" at routing time (human approved the plan).
+                    // Otherwise the ticket was "Open" (fresh) → Phase 1.
+                    char planner_task[4096] = {0};
                     if (a->resolving_block) {
                         snprintf(planner_task, sizeof(planner_task),
                                  "*** THIS TICKET IS BLOCKED — YOUR ROLE IS UNLOCKER, NOT PLANNER ***\n\n"
@@ -725,6 +763,47 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "!! DO NOT create sub-tickets. DO NOT reassign the ticket.\n",
                                  wiki_page, wiki_cmd,
                                  a->current_ticket);
+                    } else if (a->doing_qa) {
+                        snprintf(planner_task, sizeof(planner_task),
+                                 "ALL SUB-TASKS COMPLETED — QUALITY ASSESSMENT REQUIRED\n\n"
+                                 "Every sub-ticket for this parent task has been delivered and approved\n"
+                                 "by the reviewer. Your job now is to evaluate the overall quality of\n"
+                                 "the complete deliverable before closing the task.\n\n"
+                                 "STEP 1 — REVIEW all sub-tickets listed in EXISTING SUB-TICKETS above.\n"
+                                 "   For each sub-ticket, read its wiki page to understand what was built\n"
+                                 "   and what the reviewer found. Check the discussion history for issues.\n\n"
+                                 "STEP 2 — INSPECT the actual deliverables in your workspace:\n"
+                                 "     fossil update trunk\n"
+                                 "   Read the files that were committed. Run the build if applicable.\n"
+                                 "   Verify the deliverables satisfy the ORIGINAL ticket description.\n\n"
+                                 "STEP 3 — DOCUMENT your quality assessment in wiki page \"%s\":\n"
+                                 "%s\n"
+                                 "   Write a section titled '## Quality Assessment' containing:\n"
+                                 "   - Overall verdict: APPROVED or NEEDS IMPROVEMENT\n"
+                                 "   - Per sub-task: what was delivered and whether it is acceptable\n"
+                                 "   - Any gaps, integration issues, or technical debt introduced\n"
+                                 "   - If NEEDS IMPROVEMENT: exact issues and what sub-tasks must fix them\n\n"
+                                 "STEP 4a — If ALL deliverables are satisfactory:\n"
+                                 "     fossil ticket set %s status \"Done\"\n"
+                                 "   This closes the overall task permanently.\n\n"
+                                 "STEP 4b — If quality needs improvement, create fix sub-tickets:\n"
+                                 "   REUSE existing work — do not re-implement what is already correct.\n"
+                                 "   Only create sub-tickets for the specific gaps found.\n"
+                                 "   Run once per fix sub-task:\n"
+                                 "     fossil ticket add title \"[Fix] <issue title>\" \\\n"
+                                 "       comment \"[parent:%s] <exact issue and what must be fixed>\" \\\n"
+                                 "       status \"Planned\" \\\n"
+                                 "       private_contact \"<agent hash>\"\n"
+                                 "   Then restore monitoring so the orchestrator tracks the new sub-tasks:\n"
+                                 "     fossil ticket set %s status \"Delegated\"\n"
+                                 "   The orchestrator will run another quality assessment when the\n"
+                                 "   new sub-tasks are all Done.\n"
+                                 "!! Do NOT set status to 'Done' when creating fix sub-tickets.\n"
+                                 "!! Do NOT create review sub-tickets — review is automatic.\n",
+                                 wiki_page, wiki_cmd,
+                                 a->current_ticket,
+                                 a->current_ticket,
+                                 a->current_ticket);
                     } else if (subtasks_ctx[0]) {
                         snprintf(planner_task, sizeof(planner_task),
                                  "*** SUB-TICKETS ALREADY EXIST — DO NOT CREATE MORE ***\n"
@@ -733,48 +812,75 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "2. If planning notes are absent from the wiki page \"%s\", add them now:\n"
                                  "%s\n"
                                  "   Write why this decomposition was chosen, key risks, and success criteria.\n"
-                                 "3. Mark the parent ticket as Done — its work is complete once planned:\n"
-                                 "     fossil ticket set %s status \"Done\"\n"
-                                 "   The sub-tickets carry all remaining work. Do NOT assign the parent\n"
-                                 "   to any agent — it must not be picked up for implementation.\n",
+                                 "3. Set the parent ticket to Delegated so the orchestrator can monitor\n"
+                                 "   sub-task completion and trigger a quality assessment when all are done:\n"
+                                 "     fossil ticket set %s status \"Delegated\"\n"
+                                 "   Do NOT set it to Done — quality assessment happens automatically\n"
+                                 "   after all sub-tickets are finished.\n",
                                  wiki_page, wiki_cmd,
                                  a->current_ticket);
-                    } else {
+                    } else if (a->doing_phase2) {
                         snprintf(planner_task, sizeof(planner_task),
-                                 "!! EXECUTE IMMEDIATELY — do NOT describe what you will do.\n"
-                                 "!! Do NOT output 'Próximos Passos' or any roadmap narration.\n"
-                                 "!! Run the fossil commands now, in this response.\n\n"
-                                 "STEP 1 — CREATE SUB-TICKETS NOW:\n"
-                                 "For each sub-task, pick the agent from AVAILABLE AGENTS whose\n"
-                                 "capabilities best match. Do NOT default everything to one agent.\n"
-                                 "YOUR OWN HASH IS %s — NEVER assign a sub-ticket to yourself.\n"
-                                 "Executors are: coder, researcher, reviewer.\n\n"
-                                 "!! NEVER create a sub-ticket assigned to the reviewer for reviewing\n"
-                                 "!! another sub-ticket. Review is automatic: when a coder finishes\n"
-                                 "!! and sets a ticket to status 'Review', the reviewer picks it up\n"
-                                 "!! on its own. Creating an explicit review sub-ticket activates the\n"
-                                 "!! reviewer before any work exists and causes infinite loops.\n\n"
-                                 "Run this command once per sub-task:\n"
+                                 "THE HUMAN HAS APPROVED YOUR PLAN — CREATE SUB-TICKETS NOW.\n"
+                                 "Read the '--- DESCRIPTION ---' section in TICKET above for the plan.\n"
+                                 "Run every fossil command immediately without narrating.\n\n"
+                                 "STEP 1 — CREATE SUB-TICKETS from the plan:\n"
+                                 "For each sub-task run:\n"
                                  "  fossil ticket add title \"<sub-task title>\" \\\n"
                                  "    comment \"[parent:%s] <sub-task description>\" \\\n"
                                  "    status \"Planned\" \\\n"
                                  "    private_contact \"<full agent hash from AVAILABLE AGENTS>\"\n\n"
-                                 "SEQUENCING — if sub-task B must wait for sub-task A, add to B's comment:\n"
-                                 "  [depends:<UUID that fossil printed for A>]\n"
-                                 "  UUID = exact 40-char hex from the 'fossil ticket add' output.\n"
-                                 "  NEVER write [depends:T1] or any placeholder. Only real UUIDs work.\n"
-                                 "  When unsure, make tasks sequential — it avoids wasted work.\n\n"
+                                 "YOUR OWN HASH IS %s — NEVER assign a sub-ticket to yourself.\n"
+                                 "Executors: coder, researcher. NEVER create a review sub-ticket —\n"
+                                 "review is automatic when a coder sets a ticket to 'Review'.\n\n"
+                                 "SEQUENCING — if sub-task B must wait for A, add to B's comment:\n"
+                                 "  [depends:<UUID printed by fossil for A>]\n"
+                                 "  Use the exact 40-char hex UUID. NEVER use placeholders.\n\n"
                                  "STEP 2 — DOCUMENT in wiki page \"%s\":\n"
                                  "%s\n"
-                                 "  - Why this decomposition, which agent per sub-task and why\n"
-                                 "  - Dependencies and execution order\n"
-                                 "  - Key risks and success criteria\n\n"
-                                 "STEP 3 — CLOSE the parent ticket:\n"
-                                 "  fossil ticket set %s status \"Done\"\n"
-                                 "The parent's job is done once sub-tickets exist. Do NOT assign it\n"
-                                 "to any agent for implementation — all work lives in sub-tickets.\n",
-                                 a->hash, a->current_ticket,
+                                 "  - Which sub-tasks were created and assigned to which agents\n\n"
+                                 "STEP 3 — SET parent to Delegated:\n"
+                                 "     fossil ticket set %s status \"Delegated\"\n",
+                                 a->current_ticket, a->hash,
                                  wiki_page, wiki_cmd,
+                                 a->current_ticket);
+                    } else {
+                        snprintf(planner_task, sizeof(planner_task),
+                                 "PHASE 1 — WRITE YOUR PROPOSED PLAN INTO THE TICKET (NO SUB-TICKETS YET)\n\n"
+                                 "!! BEFORE PLANNING: read the '--- HUMAN REMARKS ---' section in the\n"
+                                 "!! TICKET above. Every entry there is a requirement or feedback the human\n"
+                                 "!! added via the web UI. You MUST incorporate ALL of them into the plan.\n"
+                                 "!! If '--- HUMAN REMARKS ---' is not '(none)', your plan MUST address\n"
+                                 "!! each remark with at least one dedicated sub-task.\n\n"
+                                 "Design the decomposition (including all human remarks), then write\n"
+                                 "your plan directly into the ticket so the human can review it.\n\n"
+                                 "STEP 1 — WRITE THE PLAN using ONE fossil command (literal newlines OK):\n\n"
+                                 "     fossil ticket set %s comment \"[original description]\n"
+                                 "\n"
+                                 "     ---\n"
+                                 "     ## Proposed Plan\n"
+                                 "\n"
+                                 "     ### Sub-task 1: <title>\n"
+                                 "     - Assigned to: <agent name — from AVAILABLE AGENTS below>\n"
+                                 "     - Description: <what exactly must be done>\n"
+                                 "     - Depends on: <none, or Sub-task N>\n"
+                                 "     [repeat for each sub-task]\n"
+                                 "\n"
+                                 "     ### Execution Order\n"
+                                 "     <sequential vs parallel rationale>\n"
+                                 "\n"
+                                 "     ### Risks and Success Criteria\n"
+                                 "     <key risks and how to measure success>\"\n\n"
+                                 "  YOUR OWN HASH IS %s — NEVER assign a sub-ticket to yourself.\n"
+                                 "  NEVER plan a review sub-ticket — review is automatic.\n"
+                                 "  Avoid double-quote characters inside the plan text.\n\n"
+                                 "STEP 2 — SUBMIT for human review:\n"
+                                 "     fossil ticket set %s status \"Pending Approval\"\n\n"
+                                 "!! STOP. The human will read the plan in the Fossil web UI.\n"
+                                 "!! To approve: set status to 'Verified' — you will create sub-tickets.\n"
+                                 "!! To request changes: set status back to 'Open' — you will re-plan.\n"
+                                 "!! Your task is complete when status is 'Pending Approval'.\n",
+                                 a->current_ticket, a->hash,
                                  a->current_ticket);
                     }
 
@@ -830,7 +936,28 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strcpy(pmsg.next_action,
                                "Identify blocker, decide autonomously, document in wiki, reset ticket to Planned");
                       } else {
-                        strcpy(pmsg.intent, "Plan, Decompose, and Delegate Ticket");
+                        // Set intent, state and next_action based on planner phase
+                        if (a->doing_qa) {
+                            strcpy(pmsg.intent, "Quality Assessment — Evaluate All Deliverables");
+                            strcpy(pmsg.current_state, "Quality Assessment");
+                            strcpy(pmsg.next_action,
+                                   "Review deliverables, assess quality — mark Done if satisfied or create fix sub-tickets and set to Delegated");
+                        } else if (a->doing_phase2) {
+                            strcpy(pmsg.intent, "Execute Approved Plan — Create Sub-Tickets Now");
+                            strcpy(pmsg.current_state, "Executing Approved Plan");
+                            strcpy(pmsg.next_action,
+                                   "Create sub-tickets from plan in ticket description, set parent to Delegated");
+                        } else if (subtasks_ctx[0]) {
+                            strcpy(pmsg.intent, "Sub-Tickets Exist — Document and Delegate");
+                            strcpy(pmsg.current_state, "Delegating");
+                            strcpy(pmsg.next_action,
+                                   "Document decomposition in wiki, set parent to Delegated for quality monitoring");
+                        } else {
+                            strcpy(pmsg.intent, "Propose Plan — Write to Ticket, Await Human Approval");
+                            strcpy(pmsg.current_state, "Planning (Phase 1 — Awaiting Approval)");
+                            strcpy(pmsg.next_action,
+                                   "Write plan into ticket comment, set status to Pending Approval");
+                        }
                         snprintf(pmsg.context, sizeof(pmsg.context),
                                  "%s"
                                  "=== TICKET ===\n"
@@ -850,9 +977,6 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  pending_reviews_ctx,
                                  subtasks_ctx[0] ? subtasks_ctx : "  (none yet)\n",
                                  planner_task);
-                        strcpy(pmsg.current_state, "Planning");
-                        strcpy(pmsg.next_action,
-                               "Decompose into sub-tickets assigned to executor agents (never yourself), document in wiki, mark parent Done");
                       }
                     } else if (strcmp(a->role, "coder") == 0) {
                         strcpy(pmsg.intent, "Implement Ticket on Branch");
@@ -1141,10 +1265,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     if (strcmp(a->role, "planner") == 0) {
                         snprintf(nudge, sizeof(nudge),
                                  "Ticket %s is still In Progress. You have already done your analysis.\n"
-                                 "Now EXECUTE — run the fossil ticket add commands you planned.\n"
+                                 "Now EXECUTE — run the fossil commands from your task instructions.\n"
                                  "Do NOT explain further. Run every command now, one by one.\n"
-                                 "The task ends only when all sub-tickets are created and the\n"
-                                 "parent ticket status is set to Done in Fossil.",
+                                 "The task ends only when the Fossil ticket status has been updated\n"
+                                 "(to 'Pending Approval', 'Delegated', 'Done', or 'Planned' depending\n"
+                                 "on which phase you are in — see YOUR TASK above).",
                                  a->current_ticket);
                     } else {
                         snprintf(nudge, sizeof(nudge),
@@ -1185,6 +1310,48 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     }
                 }
             }
+        }
+    }
+
+    // QA promotion: when all sub-tickets of a "Delegated" parent ticket are Done,
+    // promote the parent to "QA Ready" so the planner can assess overall quality.
+    // Rate-limit: one log entry per promotion (status change prevents re-entry).
+    for (int t = 0; t < tkt_count; t++) {
+        if (strcasecmp(tickets[t].status, "Delegated") != 0) continue;
+
+        // Find sub-tickets by scanning for [parent:<uuid>] in comment field.
+        char parent_tag[72];
+        snprintf(parent_tag, sizeof(parent_tag), "[parent:%s]", tickets[t].tkt_uuid);
+
+        int sub_count    = 0;
+        int pending_count = 0;
+        for (int t2 = 0; t2 < tkt_count; t2++) {
+            if (t2 == t) continue;
+            if (!strstr(tickets[t2].comment, parent_tag)) continue;
+            sub_count++;
+            // Any status that is not Done/closed is still pending.
+            if (strcasecmp(tickets[t2].status, "Done")   != 0 &&
+                strcasecmp(tickets[t2].status, "closed") != 0) {
+                pending_count++;
+            }
+        }
+
+        // Tickets absent from the array (filtered by SQL as "Closed"/lowercase "done")
+        // are implicitly terminal — so sub_count covers only known tickets and
+        // pending_count == 0 means all found tickets are Done.
+        if (sub_count > 0 && pending_count == 0) {
+            fossil_ticket_set_status(tickets[t].tkt_uuid, "QA Ready");
+            // Update in-memory status to avoid re-triggering on the same tick.
+            strncpy(tickets[t].status, "QA Ready", sizeof(tickets[t].status) - 1);
+            char qa_log[256];
+            snprintf(qa_log, sizeof(qa_log),
+                     "[qa] All %d sub-tickets done for parent %.10s — promoted to QA Ready",
+                     sub_count, tickets[t].tkt_uuid);
+            log_message(qa_log);
+            fossil_wiki_append_log(tickets[t].tkt_uuid, "orchestrator",
+                                   "All sub-tasks completed and approved. "
+                                   "Parent ticket promoted to **QA Ready** — "
+                                   "planner will assess overall quality before closing.");
         }
     }
 }
