@@ -611,6 +611,19 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strncpy(pending_reviews_ctx, "  (none — all agents free to accept new work)\n",
                                 sizeof(pending_reviews_ctx) - 1);
 
+                    // When building the reviewer PULSE, we need the hash of the coder
+                    // who submitted THIS specific ticket, not just the first coder in the
+                    // list. Scan pending_review_ticket to find the original submitter.
+                    char rework_coder_hash[128] = {0};
+                    for (int j = 0; j < agent_count; j++) {
+                        if (strcmp(agents[j].pending_review_ticket, a->current_ticket) == 0) {
+                            strncpy(rework_coder_hash, agents[j].hash, sizeof(rework_coder_hash) - 1);
+                            break;
+                        }
+                    }
+                    if (!rework_coder_hash[0])
+                        strncpy(rework_coder_hash, coder_hash, sizeof(rework_coder_hash) - 1);
+
                     // Point 2/3: collect sub-tickets (comment contains [parent:<uuid>])
                     // and dependency references ([depends:<uuid>]) for richer context.
                     char parent_tag[72];
@@ -1119,7 +1132,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  branch_name,
                                  a->current_ticket,
                                  a->current_ticket,
-                                 a->current_ticket, a->current_ticket, coder_hash, coder_hash);
+                                 a->current_ticket, a->current_ticket, rework_coder_hash, rework_coder_hash);
                         strcpy(pmsg.current_state, "Reviewing");
                         strcpy(pmsg.next_action,
                                "Read all changes, build/run code, verify every requirement — merge only if fully satisfied, otherwise Rework");
