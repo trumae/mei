@@ -120,7 +120,8 @@
       "Bash(awk -F'\\\\t' 'NR==6 {print \"UUID: \"$2\"\\\\nStatus: \"$6\"\\\\nAssignee \\(private_contact\\): \"$11\"\\\\nTitle: \"$13\"\\\\nComment: \"$14\"\\\\nChangelog: \"$15\"\\\\nReviewer notes: \"$16}')",
       "Bash(awk -F'\\\\t' 'NR==6 {print \"Status: \"$6\"\\\\nAssignee: \"$11}')",
       "Bash(awk -F'\\\\t' '$2 ~ /^b0859b97/ {print \"Status: \"$6\"\\\\nAssignee: \"$11}')",
-      "Bash(awk -F'\\\\t' '$2 ~ /^b0859b97/ {print \"Row: \"$0}')"
+      "Bash(awk -F'\\\\t' '$2 ~ /^b0859b97/ {print \"Row: \"$0}')",
+      "Bash(xargs ls)"
     ]
   }
 }
