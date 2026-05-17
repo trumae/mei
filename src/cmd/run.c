@@ -350,6 +350,23 @@ int cmd_run(int argc, char *argv[]) {
                 }
                 break;
 
+            case 'd': case 'D':
+                if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
+                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    int chosen = ui_redirect_dialog(agents, agent_count);
+                    if (chosen >= 0) {
+                        if (fossil_ticket_assign(t->tkt_uuid, agents[chosen].hash)) {
+                            char log[256];
+                            snprintf(log, sizeof(log),
+                                     "[ok] Ticket %.12s redirected → %s",
+                                     t->tkt_uuid, agents[chosen].name);
+                            log_message(log);
+                            reload_tickets();
+                        }
+                    }
+                }
+                break;
+
             case ERR:
                 break;
         }

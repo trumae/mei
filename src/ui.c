@@ -117,6 +117,21 @@ static void draw_titled_box(WINDOW *win, const char *title) {
 }
 
 // ──────────────────────────────────────────────
+// Strip leading "[tag] " prefixes from comment text
+// ──────────────────────────────────────────────
+
+static const char *skip_comment_meta(const char *s) {
+    const char *p = s;
+    while (*p == '[') {
+        const char *e = strchr(p, ']');
+        if (!e) break;
+        p = e + 1;
+        while (*p == ' ') p++;
+    }
+    return p;
+}
+
+// ──────────────────────────────────────────────
 // Word-wrap printer — returns rows used
 // ──────────────────────────────────────────────
 
@@ -136,9 +151,28 @@ static int draw_wrapped(WINDOW *win, int start_row, int col, int max_w, int max_
         }
         while (seg_len > 0 && row < max_rows) {
             int chunk = (seg_len > max_w) ? max_w : seg_len;
-            mvwprintw(win, start_row + row, col, "%.*s", chunk, p);
-            p += chunk;
-            seg_len -= chunk;
+            if (seg_len > max_w) {
+                // Find the last space within the chunk for word wrapping
+                int break_at = -1;
+                for (int i = chunk - 1; i >= 0; i--) {
+                    if (p[i] == ' ') { break_at = i; break; }
+                }
+                if (break_at > 0) {
+                    chunk = break_at;
+                    mvwprintw(win, start_row + row, col, "%.*s", chunk, p);
+                    p += chunk + 1;  // skip the space
+                    seg_len -= chunk + 1;
+                } else {
+                    // No space found — hard break at max_w
+                    mvwprintw(win, start_row + row, col, "%.*s", chunk, p);
+                    p += chunk;
+                    seg_len -= chunk;
+                }
+            } else {
+                mvwprintw(win, start_row + row, col, "%.*s", chunk, p);
+                p += chunk;
+                seg_len -= chunk;
+            }
             row++;
         }
         if (nl) p = nl + 1;
@@ -505,6 +539,79 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent,
 }
 
 // ──────────────────────────────────────────────
+// Redirect dialog — overlay to pick an agent
+// ──────────────────────────────────────────────
+
+int ui_redirect_dialog(Agent *agents, int agent_count) {
+    if (agent_count <= 0) return -1;
+
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    int inner   = agent_count + 2;  // rows for agent list
+    int dialog_h = inner + 4;       // border + title + list + hint
+    int dialog_w = 36;
+    if (dialog_h > rows - 2) dialog_h = rows - 2;
+    int visible_agents = dialog_h - 4;
+    if (visible_agents > agent_count) visible_agents = agent_count;
+
+    int dy = (rows - dialog_h) / 2;
+    int dx = (cols - dialog_w) / 2;
+    if (dy < 0) dy = 0;
+    if (dx < 0) dx = 0;
+
+    WINDOW *dlg = newwin(dialog_h, dialog_w, dy, dx);
+    if (!dlg) return -1;
+
+    int sel = 0;
+    int result = -1;
+
+    while (1) {
+        werase(dlg);
+        wattron(dlg, COLOR_PAIR(CP_HEADER) | A_BOLD);
+        box(dlg, 0, 0);
+        mvwprintw(dlg, 0, 2, " Redirect Ticket ");
+        wattroff(dlg, COLOR_PAIR(CP_HEADER) | A_BOLD);
+
+        for (int i = 0; i < visible_agents; i++) {
+            const char *sym  = state_symbol(agents[i].state);
+            int         cp   = state_color(agents[i].state);
+            int         row  = i + 2;
+            int         inner_w = dialog_w - 4;
+            if (i == sel) {
+                wattron(dlg, COLOR_PAIR(CP_SELECTED) | A_BOLD);
+                mvwprintw(dlg, row, 2, " [%s] %-*.*s", sym,
+                          inner_w - 5, inner_w - 5, agents[i].name);
+                wattroff(dlg, COLOR_PAIR(CP_SELECTED) | A_BOLD);
+            } else {
+                if (cp) wattron(dlg, COLOR_PAIR(cp));
+                mvwprintw(dlg, row, 2, " [%s] %-*.*s", sym,
+                          inner_w - 5, inner_w - 5, agents[i].name);
+                if (cp) wattroff(dlg, COLOR_PAIR(cp));
+            }
+        }
+
+        wattron(dlg, A_DIM);
+        mvwprintw(dlg, dialog_h - 2, 2, "Enter:confirm  Esc:cancel");
+        wattroff(dlg, A_DIM);
+
+        wnoutrefresh(dlg);
+        doupdate();
+
+        int ch = getch();
+        if (ch == KEY_UP)   { if (sel > 0) sel--; }
+        else if (ch == KEY_DOWN) { if (sel < visible_agents - 1) sel++; }
+        else if (ch == '\n' || ch == KEY_ENTER) { result = sel; break; }
+        else if (ch == 27) break;
+        // ERR (timeout) — just redraw
+    }
+
+    delwin(dlg);
+    touchwin(stdscr);
+    return result;
+}
+
+// ──────────────────────────────────────────────
 // Screen 2: Tickets
 // ──────────────────────────────────────────────
 
@@ -638,7 +745,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
             int desc_rows = dh - row - (t->reviewer_notes[0] ? 5 : 2);
             if (desc_rows < 1) desc_rows = 1;
             if (desc_rows > dh - row - 1) desc_rows = dh - row - 1;
-            row += draw_wrapped(win_details, row, 2, text_w, desc_rows, t->comment);
+            row += draw_wrapped(win_details, row, 2, text_w, desc_rows, skip_comment_meta(t->comment));
         }
 
         // Reviewer notes
@@ -661,7 +768,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
     draw_log_panel();
     draw_status_bar(x_max,
         "q:quit  Tab:screens  \xe2\x86\x91\xe2\x86\x93:select  "
-        "s:next-status  S:prev-status  o:sort  r:reload");
+        "s:next-status  S:prev-status  d:redirect  o:sort  r:reload");
 
     wnoutrefresh(win_header);
     wnoutrefresh(win_list);

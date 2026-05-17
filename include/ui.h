@@ -23,6 +23,7 @@ void draw_main_screen(Agent *agents, int agent_count, int selected_agent,
                       ActiveScreen active_screen);
 void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
                          int sort_order, Agent *agents, int agent_count);
+int ui_redirect_dialog(Agent *agents, int agent_count);
 void log_message(const char *msg);
 
 #endif // UI_H

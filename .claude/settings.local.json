@@ -114,7 +114,14 @@
       "Bash(rm -f testproject.fossil)",
       "Bash(/Users/viniciusmaciel/projs/MEI/bin/orchestrator_ui new *)",
       "Bash(tmux list-panes *)",
-      "Bash(awk '/08f273dfca/{found=1} found{print; if\\(/^[0-9]/ && !/08f273/\\) exit}')"
+      "Bash(awk '/08f273dfca/{found=1} found{print; if\\(/^[0-9]/ && !/08f273/\\) exit}')",
+      "Bash(curl -s \"http://localhost:8080/tktview?name=8470cc6547\")",
+      "Bash(awk -F'\\\\t' '{print NR\". uuid=\"substr\\($2,1,10\\), \"status=\"$6, \"title=\"substr\\($13,1,60\\)}')",
+      "Bash(awk -F'\\\\t' 'NR==6 {print \"UUID: \"$2\"\\\\nStatus: \"$6\"\\\\nAssignee \\(private_contact\\): \"$11\"\\\\nTitle: \"$13\"\\\\nComment: \"$14\"\\\\nChangelog: \"$15\"\\\\nReviewer notes: \"$16}')",
+      "Bash(awk -F'\\\\t' 'NR==6 {print \"Status: \"$6\"\\\\nAssignee: \"$11}')",
+      "Bash(awk -F'\\\\t' '$2 ~ /^b0859b97/ {print \"Status: \"$6\"\\\\nAssignee: \"$11}')",
+      "Bash(awk -F'\\\\t' '$2 ~ /^b0859b97/ {print \"Row: \"$0}')",
+      "Bash(xargs ls)"
     ]
   }
 }
