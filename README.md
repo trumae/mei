@@ -1,4 +1,4 @@
-# MEI — Multi-Agent Environment Integrator
+# MEI — Multi-Agent Environment Integrator - in brazilian portuguese: Micro Empreendedor Individual :)
 
 [![License](https://img.shields.io/badge/license-BSD%202--Clause-blue.svg)](LICENSE)
 
