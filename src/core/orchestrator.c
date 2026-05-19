@@ -804,12 +804,21 @@ void orchestrator_tick(Agent *agents, int agent_count) {
 } while (0)
 
                     char _cmd_set_pa[768],       _cmd_set_planned[768],   _cmd_set_delegated[768];
-                    char _cmd_set_done[768],      _cmd_set_review[768],    _cmd_set_blocked[768];
+                    char _cmd_set_done[1024],     _cmd_set_review[768],    _cmd_set_blocked[768];
                     char _cmd_set_rework[768];
                     _CMD_STATUS(_cmd_set_pa,        "Pending Approval");
                     _CMD_STATUS(_cmd_set_planned,   "Planned");
                     _CMD_STATUS(_cmd_set_delegated, "Delegated");
                     _CMD_STATUS(_cmd_set_done,      "Done");
+                    // For GitHub: also close the issue so it disappears from the open list.
+                    if (_is_gh) {
+                        char _close_suffix[256];
+                        snprintf(_close_suffix, sizeof(_close_suffix),
+                                 "\n     gh issue close %s -R '%s' > /dev/null 2>&1",
+                                 _tkt_addr, g_backend->repo_id);
+                        strncat(_cmd_set_done, _close_suffix,
+                                sizeof(_cmd_set_done) - strlen(_cmd_set_done) - 1);
+                    }
                     _CMD_STATUS(_cmd_set_review,    "Review");
                     _CMD_STATUS(_cmd_set_blocked,   "Blocked");
                     _CMD_STATUS(_cmd_set_rework,    "Rework");
