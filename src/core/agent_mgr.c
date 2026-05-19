@@ -1,8 +1,12 @@
 #include "core/agent_mgr.h"
-#include "core/fossil_skill.h"
+#include "core/vcs_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// Candidate directories scanned in order. First one that contains .md files wins.
+// .mei/ is the current standard; .agents/ is the legacy fallback.
+static const char *AGENT_DIRS[] = { ".mei", ".agents", NULL };
 
 static void trim_trailing_whitespace(char *s) {
     int len = (int)strlen(s);
@@ -10,106 +14,117 @@ static void trim_trailing_whitespace(char *s) {
         s[--len] = '\0';
 }
 
-int agent_mgr_load_all(Agent *agents) {
-    int count = 0;
-    const char *repo_path = fossil_get_repo_path();
-    
-    if (!repo_path || strlen(repo_path) == 0) {
-        return 0;
+// Resolve which agent directory to use. Returns the dir string, or NULL if none found.
+// Emits a warning to stderr if the legacy .agents/ fallback is used.
+static const char *resolve_agent_dir(void) {
+    for (int d = 0; AGENT_DIRS[d]; d++) {
+        char files[1][256];
+        int n = g_backend->list_agent_files(g_backend, AGENT_DIRS[d], files, 1);
+        if (n > 0) {
+            if (d > 0)
+                fprintf(stderr, "[WARN] Using legacy %s/ — consider migrating to .mei/\n",
+                        AGENT_DIRS[d]);
+            return AGENT_DIRS[d];
+        }
     }
+    return NULL;
+}
 
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "fossil ls -r trunk -R %s 2>/dev/null", repo_path);
-    
-    FILE *ls_fp = popen(cmd, "r");
-    if (ls_fp) {
-        char filename[512];
-        while (fgets(filename, sizeof(filename), ls_fp) && count < MAX_AGENTS) {
-            // Remove newline
-            filename[strcspn(filename, "\n")] = 0;
-            
-            // Check if file is in .agents/ and ends with .md
-            if (strncmp(filename, ".agents/", 8) == 0) {
-                const char *ext = strrchr(filename, '.');
-                if (ext && strcmp(ext, ".md") == 0) {
-                    
-                    // Now read the file contents using fossil cat
-                    char cat_cmd[2048];
-                    snprintf(cat_cmd, sizeof(cat_cmd), "fossil cat \"%s\" -r trunk -R %s 2>/dev/null", filename, repo_path);
-                    
-                    FILE *cat_fp = popen(cat_cmd, "r");
-                    if (cat_fp) {
-                        char line[2048];
-                        Agent *a = &agents[count];
-                        memset(a, 0, sizeof(Agent));
-                        
-                        a->state = AGENT_STATE_OPEN;
-                        a->last_heartbeat = 0;
-                        strcpy(a->current_ticket, "None");
+// Parse a single agent definition from a text buffer (one .md file content).
+// Returns 1 if a valid agent was extracted, 0 otherwise.
+static int parse_agent_from_buffer(const char *buf, Agent *a) {
+    memset(a, 0, sizeof(Agent));
+    a->state = AGENT_STATE_OPEN;
+    strcpy(a->current_ticket, "None");
 
-                        int in_description = 0;
-                        while (fgets(line, sizeof(line), cat_fp)) {
-                            // Once inside the description block, accumulate every
-                            // subsequent line until EOF — no other fields follow it.
-                            if (in_description) {
-                                strncat(a->description, line,
-                                        sizeof(a->description) - strlen(a->description) - 1);
-                                continue;
-                            }
-                            char key[64];
-                            char value[1024];
-                            if (sscanf(line, "%63[^:]: %[^\n]", key, value) == 2) {
-                                if (strcmp(key, "name") == 0) {
-                                    strncpy(a->name, value, sizeof(a->name)-1);
-                                } else if (strcmp(key, "role") == 0) {
-                                    strncpy(a->role, value, sizeof(a->role)-1);
-                                } else if (strcmp(key, "cli") == 0) {
-                                    strncpy(a->cli, value, sizeof(a->cli)-1);
-                                } else if (strcmp(key, "cmd") == 0) {
-                                    strncpy(a->cmd, value, sizeof(a->cmd)-1);
-                                } else if (strcmp(key, "description") == 0) {
-                                    strncpy(a->description, value, sizeof(a->description)-1);
-                                    strncat(a->description, "\n",
-                                            sizeof(a->description) - strlen(a->description) - 1);
-                                    in_description = 1;
-                                } else if (strcmp(key, "capabilities") == 0) {
-                                    strncpy(a->capabilities, value, sizeof(a->capabilities)-1);
-                                }
-                            }
-                        }
-                        pclose(cat_fp);
-                        
-                        // Compute SHA1 hash of the agent name for private_contact matching
-                        // Use cut instead of awk to avoid env issues in popen
-                        char hash_cmd[256];
-                        snprintf(hash_cmd, sizeof(hash_cmd), "printf '%%s' \"%s\" | shasum | cut -d' ' -f1", a->name);
-                        FILE *hash_fp = popen(hash_cmd, "r");
-                        if (hash_fp) {
-                            if (fgets(a->hash, sizeof(a->hash), hash_fp)) {
-                                a->hash[strcspn(a->hash, "\n \t")] = 0; // strip newline and trailing spaces
-                            }
-                            pclose(hash_fp);
-                        }
-                        
-                        // Strip trailing whitespace from all string fields so that
-                        // names like "researcher " (common editor artifact) don't
-                        // corrupt tmux session names and temp file paths downstream.
-                        trim_trailing_whitespace(a->name);
-                        trim_trailing_whitespace(a->role);
-                        trim_trailing_whitespace(a->cli);
-                        trim_trailing_whitespace(a->cmd);
-                        trim_trailing_whitespace(a->capabilities);
-                        trim_trailing_whitespace(a->description);
+    int in_description = 0;
+    const char *p = buf;
 
-                        if (strlen(a->name) > 0) {
-                            count++;
-                        }
-                    }
+    while (*p) {
+        // Find end of current line
+        const char *eol = strchr(p, '\n');
+        size_t line_len = eol ? (size_t)(eol - p) : strlen(p);
+
+        char line[2048];
+        size_t copy_len = line_len < sizeof(line) - 1 ? line_len : sizeof(line) - 2;
+        strncpy(line, p, copy_len);
+        line[copy_len] = '\0';
+
+        if (in_description) {
+            // Accumulate every subsequent line into description until EOF
+            strncat(a->description, line,
+                    sizeof(a->description) - strlen(a->description) - 1);
+            strncat(a->description, "\n",
+                    sizeof(a->description) - strlen(a->description) - 1);
+        } else {
+            char key[64], value[1024];
+            if (sscanf(line, "%63[^:]: %[^\n]", key, value) == 2) {
+                if (strcmp(key, "name") == 0) {
+                    strncpy(a->name, value, sizeof(a->name) - 1);
+                } else if (strcmp(key, "role") == 0) {
+                    strncpy(a->role, value, sizeof(a->role) - 1);
+                } else if (strcmp(key, "cli") == 0) {
+                    strncpy(a->cli, value, sizeof(a->cli) - 1);
+                } else if (strcmp(key, "cmd") == 0) {
+                    strncpy(a->cmd, value, sizeof(a->cmd) - 1);
+                } else if (strcmp(key, "capabilities") == 0) {
+                    strncpy(a->capabilities, value, sizeof(a->capabilities) - 1);
+                } else if (strcmp(key, "description") == 0) {
+                    strncpy(a->description, value, sizeof(a->description) - 1);
+                    strncat(a->description, "\n",
+                            sizeof(a->description) - strlen(a->description) - 1);
+                    in_description = 1;
                 }
             }
         }
-        pclose(ls_fp);
+
+        p += line_len;
+        if (*p == '\n') p++;
     }
-    
+
+    // Compute SHA1 hash of the agent name for private_contact matching
+    if (a->name[0]) {
+        char hash_cmd[256];
+        snprintf(hash_cmd, sizeof(hash_cmd),
+                 "printf '%%s' \"%s\" | shasum | cut -d' ' -f1", a->name);
+        FILE *hash_fp = popen(hash_cmd, "r");
+        if (hash_fp) {
+            if (fgets(a->hash, sizeof(a->hash), hash_fp))
+                a->hash[strcspn(a->hash, "\n \t")] = 0;
+            pclose(hash_fp);
+        }
+    }
+
+    // Strip trailing whitespace from all string fields
+    trim_trailing_whitespace(a->name);
+    trim_trailing_whitespace(a->role);
+    trim_trailing_whitespace(a->cli);
+    trim_trailing_whitespace(a->cmd);
+    trim_trailing_whitespace(a->capabilities);
+    trim_trailing_whitespace(a->description);
+
+    return (strlen(a->name) > 0) ? 1 : 0;
+}
+
+int agent_mgr_load_all(Agent *agents) {
+    if (!g_backend) return 0;
+
+    const char *agent_dir = resolve_agent_dir();
+    if (!agent_dir) return 0;
+
+    char filenames[MAX_AGENTS][256];
+    int file_count = g_backend->list_agent_files(g_backend, agent_dir, filenames, MAX_AGENTS);
+
+    int count = 0;
+    for (int f = 0; f < file_count && count < MAX_AGENTS; f++) {
+        char content[MEI_TEXT_BUFFER_SIZE];
+        int len = g_backend->read_agent_file(g_backend, agent_dir, filenames[f],
+                                              content, sizeof(content));
+        if (len <= 0) continue;
+
+        if (parse_agent_from_buffer(content, &agents[count]))
+            count++;
+    }
+
     return count;
 }

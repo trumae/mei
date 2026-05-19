@@ -1,4 +1,5 @@
 #include "cmd/agents.h"
+#include "core/vcs_backend.h"
 #include "core/fossil_skill.h"
 #include "core/agent_mgr.h"
 #include "agent.h"
@@ -13,23 +14,25 @@
 
 int cmd_agents(int argc, char *argv[]) {
     const char *repo_arg = (argc > 1) ? argv[1] : NULL;
-    if (!repo_arg) {
-        fprintf(stderr, "Usage: mei agents <repo.fossil>\n");
-        return 1;
-    }
 
-    char abs_path[4096];
-    if (!realpath(repo_arg, abs_path)) {
-        fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
-        return 1;
+    if (!g_backend) {
+        if (!repo_arg) {
+            fprintf(stderr, "Usage: mei agents <repo.fossil>\n");
+            return 1;
+        }
+        char abs_path[4096];
+        if (!realpath(repo_arg, abs_path)) {
+            fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
+            return 1;
+        }
+        if (!vcs_backend_create(VCS_FOSSIL, abs_path)) return 1;
     }
-    fossil_set_repo_path(abs_path);
 
     Agent agents[MAX_AGENTS];
     int count = agent_mgr_load_all(agents);
 
     if (count == 0) {
-        printf("No agents found. Add .md files to /.agents/ in the repository trunk.\n");
+        printf("No agents found. Add .md files to /.mei/ in the repository trunk.\n");
         return 0;
     }
 

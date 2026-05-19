@@ -1,4 +1,5 @@
 #include "cmd/status.h"
+#include "core/vcs_backend.h"
 #include "core/fossil_skill.h"
 #include "core/agent_mgr.h"
 #include "agent.h"
@@ -39,26 +40,32 @@ int cmd_status(int argc, char *argv[]) {
         return 1;
     }
 
-    char abs_path[4096];
-    if (!realpath(repo_arg, abs_path)) {
-        fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
-        return 1;
+    if (!g_backend) {
+        if (!repo_arg) {
+            fprintf(stderr, "Usage: mei status <repo.fossil>\n");
+            return 1;
+        }
+        char abs_path[4096];
+        if (!realpath(repo_arg, abs_path)) {
+            fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
+            return 1;
+        }
+        if (!vcs_backend_create(VCS_FOSSIL, abs_path)) return 1;
     }
-    fossil_set_repo_path(abs_path);
 
     // Load agents for hash → name resolution
     Agent agents[MAX_AGENTS];
     int agent_count = agent_mgr_load_all(agents);
 
-    FossilTicket tickets[200];
-    int tkt_count = fossil_ticket_list_parsed(tickets, 200);
+    VCSTicket tickets[200];
+    int tkt_count = g_backend->ticket_list(g_backend, tickets, 200);
 
     if (tkt_count == 0) {
-        printf("No tickets found in %s\n", abs_path);
+        printf("No tickets found in %s\n", g_backend->repo_id);
         return 0;
     }
 
-    printf("\n  %s%s%s\n\n", ANSI_BOLD, abs_path, ANSI_RESET);
+    printf("\n  %s%s%s\n\n", ANSI_BOLD, g_backend->repo_id, ANSI_RESET);
 
     for (int g = 0; GROUPS[g]; g++) {
         // Count tickets in this group
@@ -91,7 +98,7 @@ int cmd_status(int argc, char *argv[]) {
             }
 
             printf("    %s%.8s%s  %-40.40s  %s\n",
-                   ANSI_DIM, tickets[t].tkt_uuid, ANSI_RESET,
+                   ANSI_DIM, tickets[t].uuid, ANSI_RESET,
                    tickets[t].title,
                    agent_label);
         }

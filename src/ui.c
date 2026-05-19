@@ -623,7 +623,7 @@ static const char *sort_label(int sort_order) {
     }
 }
 
-void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
+void draw_tickets_screen(VCSTicket *tickets, int count, int selected,
                          int sort_order, Agent *agents, int agent_count) {
     int y_max, x_max;
     getmaxyx(stdscr, y_max, x_max);
@@ -662,7 +662,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
             int idx = scroll + i;
             if (idx >= count) break;
 
-            FossilTicket *t  = &tickets[idx];
+            VCSTicket *t  = &tickets[idx];
             const char   *sym = ticket_symbol(t->status);
             int           cp  = ticket_color(t->status);
 
@@ -696,7 +696,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
         mvwprintw(win_details, 2, 3, "No active tickets.");
         wattroff(win_details, A_DIM);
     } else if (selected >= 0 && selected < count) {
-        FossilTicket *t = &tickets[selected];
+        VCSTicket *t = &tickets[selected];
         int dh, dw;
         getmaxyx(win_details, dh, dw);
         int text_w = dw - 4;
@@ -705,7 +705,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
 
         // UUID (short)
         wattron(win_details, A_DIM);
-        mvwprintw(win_details, row++, 2, "%.32s", t->tkt_uuid);
+        mvwprintw(win_details, row++, 2, "%.32s", t->uuid);
         wattroff(win_details, A_DIM);
 
         row++;  // blank
@@ -735,7 +735,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
         row++;  // blank
 
         // Separator + description
-        if (t->comment[0]) {
+        if (t->description[0]) {
             wattron(win_details, A_DIM);
             mvwhline(win_details, row, 2, ACS_HLINE, text_w);
             mvwprintw(win_details, row, 3, " Description ");
@@ -745,7 +745,7 @@ void draw_tickets_screen(FossilTicket *tickets, int count, int selected,
             int desc_rows = dh - row - (t->reviewer_notes[0] ? 5 : 2);
             if (desc_rows < 1) desc_rows = 1;
             if (desc_rows > dh - row - 1) desc_rows = dh - row - 1;
-            row += draw_wrapped(win_details, row, 2, text_w, desc_rows, skip_comment_meta(t->comment));
+            row += draw_wrapped(win_details, row, 2, text_w, desc_rows, skip_comment_meta(t->description));
         }
 
         // Reviewer notes

@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "agent.h"
 #include "core/orchestrator.h"
+#include "core/vcs_backend.h"
 #include "core/fossil_skill.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,7 +27,7 @@ pthread_mutex_t g_agents_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_UI_TICKETS 200
 
 static ActiveScreen  g_screen          = SCREEN_AGENTS;
-static FossilTicket  g_tickets[MAX_UI_TICKETS];
+static VCSTicket     g_tickets[MAX_UI_TICKETS];
 static int           g_ticket_count    = 0;
 static int           g_selected_ticket = 0;
 static int           g_sort_order      = TICKET_SORT_STATUS;
@@ -48,8 +49,8 @@ static int status_priority(const char *s) {
 static int sort_order_ref;  // set before qsort call
 
 static int cmp_tickets(const void *a, const void *b) {
-    const FossilTicket *ta = (const FossilTicket *)a;
-    const FossilTicket *tb = (const FossilTicket *)b;
+    const VCSTicket *ta = (const VCSTicket *)a;
+    const VCSTicket *tb = (const VCSTicket *)b;
     switch (sort_order_ref) {
         case TICKET_SORT_TITLE:
             return strncasecmp(ta->title, tb->title, sizeof(ta->title));
@@ -65,10 +66,10 @@ static int cmp_tickets(const void *a, const void *b) {
 }
 
 static void reload_tickets(void) {
-    g_ticket_count = fossil_ticket_list_parsed(g_tickets, MAX_UI_TICKETS);
+    g_ticket_count = g_backend->ticket_list(g_backend, g_tickets, MAX_UI_TICKETS);
     sort_order_ref = g_sort_order;
     if (g_ticket_count > 1)
-        qsort(g_tickets, g_ticket_count, sizeof(FossilTicket), cmp_tickets);
+        qsort(g_tickets, g_ticket_count, sizeof(VCSTicket), cmp_tickets);
     if (g_selected_ticket >= g_ticket_count)
         g_selected_ticket = g_ticket_count > 0 ? g_ticket_count - 1 : 0;
 }
@@ -154,23 +155,23 @@ int cmd_run(int argc, char *argv[]) {
             repo_arg = argv[i];
     }
 
-    if (!repo_arg) {
-        fprintf(stderr, "Usage: mei run <repo.fossil> [--clean]\n");
-        return 1;
-    }
-
-    char abs_repo[4096];
-    if (!realpath(repo_arg, abs_repo)) {
-        fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
-        return 1;
+    if (!g_backend) {
+        if (!repo_arg) {
+            fprintf(stderr, "Usage: mei run <repo.fossil> [--clean]\n");
+            return 1;
+        }
+        char abs_repo[4096];
+        if (!realpath(repo_arg, abs_repo)) {
+            fprintf(stderr, "Error: could not resolve '%s'\n", repo_arg);
+            return 1;
+        }
+        if (!vcs_backend_create(VCS_FOSSIL, abs_repo)) return 1;
     }
 
     if (clean_workspaces) {
         printf("Cleaning workspaces in /tmp/workspaces/...\n");
         system("rm -rf /tmp/workspaces");
     }
-
-    fossil_set_repo_path(abs_repo);
 
     Agent agents[MAX_AGENTS];
     g_agents = agents;
@@ -186,7 +187,7 @@ int cmd_run(int argc, char *argv[]) {
     signal(SIGBUS,  handle_fatal);
 
     char msg[512];
-    snprintf(msg, sizeof(msg), "System initializing... Target Repo: %s", abs_repo);
+    snprintf(msg, sizeof(msg), "System initializing... Target Repo: %s", g_backend->repo_id);
     log_message(msg);
 
     orchestrator_init(agents, &agent_count);
@@ -316,11 +317,11 @@ int cmd_run(int argc, char *argv[]) {
             // ── Tickets screen ────────────────────────
             case 's':   // next status
                 if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
-                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    VCSTicket *t = &g_tickets[g_selected_ticket];
                     const char *ns = next_status(t->status, +1);
-                    if (fossil_ticket_set_status(t->tkt_uuid, ns)) {
+                    if (g_backend->ticket_set_status(g_backend, t->uuid, ns)) {
                         char log[256];
-                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->tkt_uuid, ns);
+                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->uuid, ns);
                         log_message(log);
                         reload_tickets();
                     }
@@ -329,11 +330,11 @@ int cmd_run(int argc, char *argv[]) {
 
             case 'S':   // prev status
                 if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
-                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    VCSTicket *t = &g_tickets[g_selected_ticket];
                     const char *ns = next_status(t->status, -1);
-                    if (fossil_ticket_set_status(t->tkt_uuid, ns)) {
+                    if (g_backend->ticket_set_status(g_backend, t->uuid, ns)) {
                         char log[256];
-                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->tkt_uuid, ns);
+                        snprintf(log, sizeof(log), "[ok] Ticket %.12s → %s", t->uuid, ns);
                         log_message(log);
                         reload_tickets();
                     }
@@ -345,21 +346,21 @@ int cmd_run(int argc, char *argv[]) {
                     g_sort_order = (g_sort_order + 1) % 3;
                     sort_order_ref = g_sort_order;
                     if (g_ticket_count > 1)
-                        qsort(g_tickets, g_ticket_count, sizeof(FossilTicket), cmp_tickets);
+                        qsort(g_tickets, g_ticket_count, sizeof(VCSTicket), cmp_tickets);
                     g_selected_ticket = 0;
                 }
                 break;
 
             case 'd': case 'D':
                 if (g_screen == SCREEN_TICKETS && g_ticket_count > 0) {
-                    FossilTicket *t = &g_tickets[g_selected_ticket];
+                    VCSTicket *t = &g_tickets[g_selected_ticket];
                     int chosen = ui_redirect_dialog(agents, agent_count);
                     if (chosen >= 0) {
-                        if (fossil_ticket_assign(t->tkt_uuid, agents[chosen].hash)) {
+                        if (g_backend->ticket_assign(g_backend, t->uuid, agents[chosen].hash)) {
                             char log[256];
                             snprintf(log, sizeof(log),
                                      "[ok] Ticket %.12s redirected → %s",
-                                     t->tkt_uuid, agents[chosen].name);
+                                     t->uuid, agents[chosen].name);
                             log_message(log);
                             reload_tickets();
                         }

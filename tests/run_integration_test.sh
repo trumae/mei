@@ -76,12 +76,12 @@ fossil init "$REPO" > /dev/null
 mkdir -p "$CHECKOUT"
 cd "$CHECKOUT"
 fossil open "$REPO" > /dev/null 2>&1
-mkdir -p .agents
+mkdir -p .mei
 
 # Agente 1: Planejador
 # Aguarda 6s (tempo do orquestrador inicializar), então cria um ticket delegado ao coder-fake
 # e aguarda indefinidamente para simular um CLI real
-cat > .agents/planner-fake.md << 'AGENTEOF'
+cat > .mei/planner-fake.md << 'AGENTEOF'
 name: planner-fake
 role: planner
 cli: bash
@@ -90,19 +90,19 @@ AGENTEOF
 
 # Agente 2: Coder
 # Lê cada linha de stdin (PULSE recebido) e ao receber o ticket, marca como Review
-cat > .agents/coder-fake.md << 'AGENTEOF'
+cat > .mei/coder-fake.md << 'AGENTEOF'
 name: coder-fake
 role: coder
 cli: bash
 cmd: bash -c "echo '[coder-fake] Aguardando tickets...' && while IFS= read -r line; do echo \"[coder-fake] PULSE recebido: \$line\"; done"
 AGENTEOF
 
-fossil add .agents/ > /dev/null
+fossil add .mei/ > /dev/null
 fossil commit -m "Configuração dos agentes de integração" > /dev/null
 vlog "Agentes configurados e commitados no Fossil."
 
 check "Repositório Fossil criado" "test -f $REPO"
-check "Agentes commitados no Fossil" "fossil ls -r trunk -R $REPO | grep -q 'planner-fake'"
+check "Agentes commitados no Fossil" "fossil ls -r trunk -R $REPO | grep -q '.mei/planner-fake.md'"
 echo ""
 
 # --- FASE 2: Iniciar Orquestrador -------------------------------------------------
@@ -112,7 +112,7 @@ log "FASE 2: Iniciando orquestrador em background (headless)..."
 # Iniciamos ele numa janela tmux dedicada (headless mas com PTY válido).
 # Depois coletamos o estado via Fossil e via tmux capture-pane.
 tmux new-session -d -s mei_test -x 220 -y 50 2>/dev/null || true
-tmux send-keys -t mei_test "$MEI_BIN $REPO --clean > /tmp/mei_orchestrator.log 2>&1" Enter
+tmux send-keys -t mei_test "$MEI_BIN fossil run $REPO --clean > /tmp/mei_orchestrator.log 2>&1" Enter
 ORCHESTRATOR_PID="" # PID será o da shell filha no tmux; usaremos tmux para verificar
 
 # Aguarda inicializar e spawnar os agentes

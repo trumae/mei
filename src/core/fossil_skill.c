@@ -1,4 +1,5 @@
 #include "core/fossil_skill.h"
+#include "core/vcs_backend.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,17 +7,9 @@
 #include <unistd.h>
 #include "ui.h"
 
+// ─── Internal repo path ───────────────────────────────────────────────────────
+
 static char global_repo_path[1024] = {0};
-
-void fossil_set_repo_path(const char *path) {
-    if (path) {
-        strncpy(global_repo_path, path, sizeof(global_repo_path) - 1);
-    }
-}
-
-const char *fossil_get_repo_path() {
-    return global_repo_path;
-}
 
 static bool run_cmd(const char *cmd) {
     char full_cmd[1024];
@@ -28,39 +21,15 @@ static bool run_cmd(const char *cmd) {
     return false;
 }
 
+// ─── Public: repo initialisation (used by cmd_new before a backend exists) ───
+
 bool fossil_init(const char *repo_path) {
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "fossil init %s", repo_path);
     return run_cmd(cmd);
 }
 
-int fossil_ticket_list(char *buffer, size_t max_size) {
-    char cmd[1024];
-    if (global_repo_path[0]) {
-        snprintf(cmd, sizeof(cmd), "fossil ticket show 0 -R %s 2>/dev/null", global_repo_path);
-    } else {
-        snprintf(cmd, sizeof(cmd), "fossil ticket show 0 2>/dev/null");
-    }
-    
-    FILE *fp = popen(cmd, "r");
-    if (!fp) {
-        return -1;
-    }
-
-    size_t total_read = 0;
-    size_t bytes_read;
-    while ((bytes_read = fread(buffer + total_read, 1, max_size - total_read - 1, fp)) > 0) {
-        total_read += bytes_read;
-        if (total_read >= max_size - 1) {
-            break;
-        }
-    }
-    
-    buffer[total_read] = '\0';
-    pclose(fp);
-    
-    return total_read;
-}
+// ─── Static ticket helpers ───────────────────────────────────────────────────
 
 static int is_valid_fossil_uuid(const char *s) {
     if (!s) return 0;
@@ -73,10 +42,10 @@ static int is_valid_fossil_uuid(const char *s) {
     return 1;
 }
 
-int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
+static int impl_ticket_list(VCSBackend *b, VCSTicket *tickets, int max_tickets) {
+    (void)b;
     if (!global_repo_path[0]) return 0;
 
-    // Ensure custom columns exist (no-op after first run; all output suppressed).
     char ensure_cols[512];
     snprintf(ensure_cols, sizeof(ensure_cols),
              "printf 'ALTER TABLE ticket ADD COLUMN changelog TEXT;\\n"
@@ -86,8 +55,6 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     system(ensure_cols);
 
     char cmd[2048];
-    // Use char(1) (SOH) as a newline placeholder so multi-line comment/reviewer_notes
-    // fields don't break the line-by-line fgets parser.  We restore \n after parsing.
     snprintf(cmd, sizeof(cmd),
              "printf \".mode list\\n"
              "PRAGMA busy_timeout = 5000;\\n"
@@ -128,14 +95,13 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
         char *reviewer_notes = fields[5];
 
         if (is_valid_fossil_uuid(uuid)) {
-            strncpy(tickets[count].tkt_uuid,        uuid,           sizeof(tickets[count].tkt_uuid) - 1);
-            strncpy(tickets[count].title,            title          ? title          : "", sizeof(tickets[count].title) - 1);
-            strncpy(tickets[count].status,           status         ? status         : "Open", sizeof(tickets[count].status) - 1);
-            strncpy(tickets[count].assignee,         assignee       ? assignee       : "", sizeof(tickets[count].assignee) - 1);
-            // Restore newlines from the SOH placeholder used in the SQL query
+            strncpy(tickets[count].uuid,           uuid,     sizeof(tickets[count].uuid) - 1);
+            strncpy(tickets[count].title,          title   ? title   : "", sizeof(tickets[count].title) - 1);
+            strncpy(tickets[count].status,         status  ? status  : "Open", sizeof(tickets[count].status) - 1);
+            strncpy(tickets[count].assignee,       assignee? assignee: "", sizeof(tickets[count].assignee) - 1);
             char *f;
-            f = tickets[count].comment;
-            strncpy(f, comment ? comment : "", sizeof(tickets[count].comment) - 1);
+            f = tickets[count].description;
+            strncpy(f, comment ? comment : "", sizeof(tickets[count].description) - 1);
             for (char *p = f; *p; p++) if ((unsigned char)*p == 1) *p = '\n';
             f = tickets[count].reviewer_notes;
             strncpy(f, reviewer_notes ? reviewer_notes : "", sizeof(tickets[count].reviewer_notes) - 1);
@@ -144,7 +110,7 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
         } else if (uuid && uuid[0] != '\0') {
             FILE *err = fopen("/tmp/fossil_err.log", "a");
             if (err) {
-                fprintf(err, "[fossil_ticket_list_parsed] rejected malformed uuid: %.80s\n", uuid);
+                fprintf(err, "[fossil ticket_list] rejected malformed uuid: %.80s\n", uuid);
                 fclose(err);
             }
         }
@@ -154,17 +120,8 @@ int fossil_ticket_list_parsed(FossilTicket *tickets, int max_tickets) {
     return count;
 }
 
-bool fossil_ticket_create(const char *title, const char *description) {
-    char cmd[2048];
-    if (global_repo_path[0]) {
-        snprintf(cmd, sizeof(cmd), "fossil ticket add title \"%s\" comment \"%s\" -R %s", title, description, global_repo_path);
-    } else {
-        snprintf(cmd, sizeof(cmd), "fossil ticket add title \"%s\" comment \"%s\"", title, description);
-    }
-    return run_cmd(cmd);
-}
-
-bool fossil_ticket_assign(const char *ticket_id, const char *agent_name) {
+static bool impl_ticket_assign(VCSBackend *b, const char *ticket_id, const char *agent_name) {
+    (void)b;
     if (!global_repo_path[0] || !ticket_id || !agent_name) return false;
 
     char tmp_sql[64] = "/tmp/mei_sql_XXXXXX";
@@ -186,7 +143,8 @@ bool fossil_ticket_assign(const char *ticket_id, const char *agent_name) {
     return (res == 0);
 }
 
-bool fossil_ticket_set_status(const char *ticket_id, const char *status) {
+static bool impl_ticket_set_status(VCSBackend *b, const char *ticket_id, const char *status) {
+    (void)b;
     if (!global_repo_path[0] || !ticket_id || !status) return false;
 
     char tmp_sql[64] = "/tmp/mei_sql_XXXXXX";
@@ -208,13 +166,15 @@ bool fossil_ticket_set_status(const char *ticket_id, const char *status) {
 
     char log_msg[256];
     snprintf(log_msg, sizeof(log_msg),
-             "fossil_ticket_set_status: ticket=%.10s status=%s result=%d",
+             "fossil ticket_set_status: ticket=%.10s status=%s result=%d",
              ticket_id, status, res);
     log_message(log_msg);
     return (res == 0);
 }
 
-bool fossil_ticket_set_reviewer_notes(const char *ticket_id, const char *notes) {
+static bool impl_ticket_set_reviewer_notes(VCSBackend *b, const char *ticket_id,
+                                            const char *notes) {
+    (void)b;
     if (!global_repo_path[0] || !ticket_id || !notes) return false;
 
     char tmp_sql[64] = "/tmp/mei_sql_XXXXXX";
@@ -240,13 +200,8 @@ bool fossil_ticket_set_reviewer_notes(const char *ticket_id, const char *notes) 
     return (res == 0);
 }
 
-bool fossil_commit(const char *workspace, const char *message) {
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cd %s && fossil commit -m \"%s\"", workspace, message);
-    return run_cmd(cmd);
-}
-
-bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
+static bool impl_ticket_add_note(VCSBackend *b, const char *ticket_id, const char *note) {
+    (void)b;
     if (!global_repo_path[0] || !ticket_id || !note) return false;
 
     char ensure_col[512];
@@ -285,21 +240,136 @@ bool fossil_ticket_add_note(const char *ticket_id, const char *note) {
     return (res == 0);
 }
 
-// Read the icomment field from the ticket creation artifact.
-// Fossil web UI stores the initial description as "J icomment VALUE" in the artifact,
-// not in the ticket table's comment column. This function extracts it directly.
-int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
-                                               char *buffer, size_t max_size) {
+// ─── Audit log (wiki) ─────────────────────────────────────────────────────────
+
+static bool impl_ticket_append_log(VCSBackend *b, const char *ticket_id,
+                                    const char *agent, const char *message) {
+    (void)b;
+    if (!global_repo_path[0] || !ticket_id || !agent || !message) return false;
+
+    char page_name[32];
+    snprintf(page_name, sizeof(page_name), "ticket-%.10s", ticket_id);
+
+    char tmp_path[64] = "/tmp/mei_wiki_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) return false;
+    close(fd);
+
+    char export_cmd[1024];
+    snprintf(export_cmd, sizeof(export_cmd),
+             "fossil wiki export \"%s\" %s -R %s >/dev/null 2>&1",
+             page_name, tmp_path, global_repo_path);
+    system(export_cmd);
+
+    // Normalise literal \n sequences written by agents
+    {
+        char norm_path[64] = "/tmp/mei_wiki_norm_XXXXXX";
+        int nfd = mkstemp(norm_path);
+        if (nfd >= 0) {
+            FILE *rf = fopen(tmp_path, "r");
+            FILE *wf = fdopen(nfd, "w");
+            if (rf && wf) {
+                int c;
+                while ((c = fgetc(rf)) != EOF) {
+                    if (c == '\\') {
+                        int nx = fgetc(rf);
+                        if (nx == 'n')      fputc('\n', wf);
+                        else if (nx == 't') fputc('\t', wf);
+                        else { fputc(c, wf); if (nx != EOF) fputc(nx, wf); }
+                    } else {
+                        fputc(c, wf);
+                    }
+                }
+                fclose(rf); fclose(wf);
+                rename(norm_path, tmp_path);
+            } else {
+                if (rf) fclose(rf);
+                if (wf) fclose(wf); else if (nfd >= 0) close(nfd);
+                unlink(norm_path);
+            }
+        }
+    }
+
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    FILE *f = fopen(tmp_path, "a");
+    if (!f) { unlink(tmp_path); return false; }
+    fprintf(f, "\n**[%04d-%02d-%02d %02d:%02d] %s:** %s\n",
+            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+            t->tm_hour, t->tm_min,
+            agent, message);
+    fclose(f);
+
+    char commit_cmd[1024];
+    snprintf(commit_cmd, sizeof(commit_cmd),
+             "fossil wiki commit \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1 "
+             "|| fossil wiki create \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1",
+             page_name, tmp_path, global_repo_path,
+             page_name, tmp_path, global_repo_path);
+    system(commit_cmd);
+
+    unlink(tmp_path);
+    return true;
+}
+
+static int impl_ticket_read_log(VCSBackend *b, const char *ticket_id,
+                                 char *buffer, size_t max_size) {
+    (void)b;
     if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
 
-    // Find the creation artifact hash: earliest 't'-type event for this ticket UUID.
-    // Fossil truncates the UUID to 10 chars in event.comment (e.g. "7aa828bb74"),
-    // so LIKE with the full 40-char UUID would never match.
+    buffer[0] = '\0';
+    char page_name[32];
+    snprintf(page_name, sizeof(page_name), "ticket-%.10s", ticket_id);
+
+    char tmp_path[64] = "/tmp/mei_wiki_read_XXXXXX";
+    int fd = mkstemp(tmp_path);
+    if (fd < 0) return 0;
+    close(fd);
+
+    char export_cmd[1024];
+    snprintf(export_cmd, sizeof(export_cmd),
+             "fossil wiki export \"%s\" %s -R %s >/dev/null 2>&1",
+             page_name, tmp_path, global_repo_path);
+    system(export_cmd);
+
+    FILE *f = fopen(tmp_path, "r");
+    if (!f) { unlink(tmp_path); return 0; }
+
+    size_t total = fread(buffer, 1, max_size - 1, f);
+    buffer[total] = '\0';
+    fclose(f);
+    unlink(tmp_path);
+    return (int)total;
+}
+
+static int impl_ticket_read_human_remarks(VCSBackend *b, const char *ticket_id,
+                                           char *buffer, size_t max_size) {
+    (void)b;
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd),
+             "fossil ticket history %.40s -R %s 2>/dev/null"
+             " | grep -B2 -A3 'icomment:'",
+             ticket_id, global_repo_path);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    size_t total = 0;
+    int c;
+    while (total < max_size - 1 && (c = fgetc(fp)) != EOF)
+        buffer[total++] = (char)c;
+    buffer[total] = '\0';
+    pclose(fp);
+    return (int)total;
+}
+
+static int impl_ticket_read_initial_description(VCSBackend *b, const char *ticket_id,
+                                                 char *buffer, size_t max_size) {
+    (void)b;
+    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+
     char uuid10[11] = {0};
     strncpy(uuid10, ticket_id, 10);
 
-    // Use SQL as a CLI arg to fossil sqlite — avoids both the stdin/ncurses
-    // interference issue and shell printf interpreting % in LIKE patterns.
     char get_hash_cmd[512];
     snprintf(get_hash_cmd, sizeof(get_hash_cmd),
              "fossil sqlite -R %s "
@@ -318,8 +388,6 @@ int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
 
     if (!artifact_hash[0]) return 0;
 
-    // Read the artifact and parse the "J icomment VALUE" line.
-    // Fossil encodes spaces as \s in artifact field values.
     char art_cmd[256];
     snprintf(art_cmd, sizeof(art_cmd),
              "fossil artifact %s -R %s 2>/dev/null", artifact_hash, global_repo_path);
@@ -349,234 +417,112 @@ int fossil_ticket_read_icomment_from_artifact(const char *ticket_id,
     return found;
 }
 
-int fossil_ticket_show_full(const char *ticket_id, char *buffer, size_t max_size) {
-    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+// ─── Workspace / VCS ─────────────────────────────────────────────────────────
 
-    FILE *dbg = fopen("/tmp/mei_tkt_debug.log", "a");
+static bool impl_workspace_init(VCSBackend *b, const char *workspace_path) {
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "mkdir -p %s && cd %s && "
+             "if [ ! -f .fslckout ]; then fossil open %s > /dev/null 2>&1; fi",
+             workspace_path, workspace_path, b->repo_id);
+    return (system(cmd) == 0);
+}
 
-    // Step 1: write SQL to temp file
-    char tmp_sql[64] = "/tmp/mei_tkt_sql_XXXXXX";
-    int fd = mkstemp(tmp_sql);
-    if (fd < 0) {
-        if (dbg) { fprintf(dbg, "[show_full] mkstemp failed for %s\n", ticket_id); fclose(dbg); }
-        return 0;
-    }
-
-    FILE *f = fdopen(fd, "w");
-    if (!f) { close(fd); unlink(tmp_sql); return 0; }
-
-    fprintf(f,
-        ".mode list\n"
-        "SELECT "
-        "'uuid:     ' || tkt_uuid         || char(10) ||"
-        "'title:    ' || coalesce(title,'')            || char(10) ||"
-        "'status:   ' || coalesce(status,'')           || char(10) ||"
-        "'type:     ' || coalesce(type,'')             || char(10) ||"
-        "'priority: ' || coalesce(priority,'')         || char(10) ||"
-        "'severity: ' || coalesce(severity,'')         || char(10) ||"
-        "'assignee: ' || coalesce(private_contact,'')  || char(10) ||"
-        "char(10) || '--- DESCRIPTION ---'             || char(10) ||"
-        "coalesce(nullif(comment,''), '(no description provided)') || char(10) ||"
-        "char(10) || '--- REVIEWER NOTES ---'          || char(10) ||"
-        "coalesce(nullif(reviewer_notes,''),'(none)')  || char(10) ||"
-        "char(10) || '--- CHANGELOG ---'               || char(10) ||"
-        "coalesce(nullif(changelog,''),'(none)')"
-        " FROM ticket WHERE tkt_uuid LIKE '%s%%';\n",
-        ticket_id);
-    fclose(f);
-
-    // Step 2: run fossil sqlite
+static bool impl_branch_create(VCSBackend *b, const char *workspace_path,
+                                const char *branch_name) {
+    (void)b;
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "fossil sqlite -R %s < %s 2>/tmp/mei_tkt_sql_err.log",
-             global_repo_path, tmp_sql);
-
-    if (dbg) fprintf(dbg, "[show_full] cmd: %s\n", cmd);
-
-    FILE *fp = popen(cmd, "r");
-    unlink(tmp_sql);
-    if (!fp) {
-        if (dbg) { fprintf(dbg, "[show_full] popen failed\n"); fclose(dbg); }
-        return 0;
-    }
-
-    size_t total = fread(buffer, 1, max_size - 1, fp);
-    buffer[total] = '\0';
-    pclose(fp);
-
-    if (dbg) fprintf(dbg, "[show_full] SQL returned %zu bytes for ticket %.10s\n", total, ticket_id);
-
-    // Step 3: if comment is empty, splice icomment from creation artifact
-    char *sentinel = strstr(buffer, "(no description provided)");
-    if (dbg) fprintf(dbg, "[show_full] sentinel found: %s\n", sentinel ? "YES" : "NO");
-
-    if (sentinel) {
-        char icomment[4096] = {0};
-        int ic_len = fossil_ticket_read_icomment_from_artifact(ticket_id, icomment, sizeof(icomment));
-        if (dbg) fprintf(dbg, "[show_full] icomment read: %d bytes: %.80s\n", ic_len, icomment);
-
-        if (ic_len > 0) {
-            size_t before       = (size_t)(sentinel - buffer);
-            size_t sentinel_len = strlen("(no description provided)");
-            size_t after        = total - before - sentinel_len;
-            if (before + (size_t)ic_len + after < max_size - 1) {
-                memmove(sentinel + ic_len, sentinel + sentinel_len, after + 1);
-                memcpy(sentinel, icomment, ic_len);
-                total = before + (size_t)ic_len + after;
-                if (dbg) fprintf(dbg, "[show_full] splice OK, new total=%zu\n", total);
-            } else {
-                if (dbg) fprintf(dbg, "[show_full] splice skipped: would overflow\n");
-            }
-        }
-    }
-
-    if (dbg) fclose(dbg);
-    return (int)total;
-}
-
-int fossil_ticket_read_wiki_log(const char *ticket_id, char *buffer, size_t max_size) {
-    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
-
-    buffer[0] = '\0';
-    char page_name[32];
-    snprintf(page_name, sizeof(page_name), "ticket-%.10s", ticket_id);
-
-    char tmp_path[64] = "/tmp/mei_wiki_read_XXXXXX";
-    int fd = mkstemp(tmp_path);
-    if (fd < 0) return 0;
-    close(fd);
-
-    char export_cmd[1024];
-    snprintf(export_cmd, sizeof(export_cmd),
-             "fossil wiki export \"%s\" %s -R %s >/dev/null 2>&1",
-             page_name, tmp_path, global_repo_path);
-    system(export_cmd);
-
-    FILE *f = fopen(tmp_path, "r");
-    if (!f) { unlink(tmp_path); return 0; }
-
-    size_t total = fread(buffer, 1, max_size - 1, f);
-    buffer[total] = '\0';
-    fclose(f);
-    unlink(tmp_path);
-    return (int)total;
-}
-
-bool fossil_wiki_append_log(const char *ticket_id, const char *agent, const char *message) {
-    if (!global_repo_path[0] || !ticket_id || !agent || !message) return false;
-
-    // Wiki page name: "ticket-" + first 10 hex chars of UUID (safe for Fossil wiki names)
-    char page_name[32];
-    snprintf(page_name, sizeof(page_name), "ticket-%.10s", ticket_id);
-
-    // Create a temp file to hold the accumulated wiki content
-    char tmp_path[64] = "/tmp/mei_wiki_XXXXXX";
-    int fd = mkstemp(tmp_path);
-    if (fd < 0) return false;
-    close(fd);
-
-    // Try to export the existing page content into the temp file.
-    // If the page doesn't exist yet fossil wiki export fails; temp file stays empty.
-    char export_cmd[1024];
-    snprintf(export_cmd, sizeof(export_cmd),
-             "fossil wiki export \"%s\" %s -R %s >/dev/null 2>&1",
-             page_name, tmp_path, global_repo_path);
-    system(export_cmd);
-
-    // Normalize literal \n sequences written by agents into real newlines.
-    // Agents sometimes produce escaped output (e.g. echo "line1\nline2") when
-    // writing wiki content, which appears verbatim in the Fossil web UI.
-    {
-        char norm_path[64] = "/tmp/mei_wiki_norm_XXXXXX";
-        int nfd = mkstemp(norm_path);
-        if (nfd >= 0) {
-            FILE *rf = fopen(tmp_path, "r");
-            FILE *wf = fdopen(nfd, "w");
-            if (rf && wf) {
-                int c;
-                while ((c = fgetc(rf)) != EOF) {
-                    if (c == '\\') {
-                        int nx = fgetc(rf);
-                        if (nx == 'n')       fputc('\n', wf);
-                        else if (nx == 't')  fputc('\t', wf);
-                        else { fputc(c, wf); if (nx != EOF) fputc(nx, wf); }
-                    } else {
-                        fputc(c, wf);
-                    }
-                }
-                fclose(rf); fclose(wf);
-                rename(norm_path, tmp_path);
-            } else {
-                if (rf) fclose(rf);
-                if (wf) fclose(wf); else if (nfd >= 0) close(nfd);
-                unlink(norm_path);
-            }
-        }
-    }
-
-    // Append the new timestamped entry (Fossil wiki / Markdown bold syntax)
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    FILE *f = fopen(tmp_path, "a");
-    if (!f) { unlink(tmp_path); return false; }
-    fprintf(f, "\n**[%04d-%02d-%02d %02d:%02d] %s:** %s\n",
-            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-            t->tm_hour, t->tm_min,
-            agent, message);
-    fclose(f);
-
-    // Commit the updated page; fall back to create if the page doesn't exist yet.
-    // system() used directly so our >/dev/null redirects are not broken by run_cmd's suffix.
-    char commit_cmd[1024];
-    snprintf(commit_cmd, sizeof(commit_cmd),
-             "fossil wiki commit \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1 "
-             "|| fossil wiki create \"%s\" %s --mimetype text/x-markdown -R %s >/dev/null 2>&1",
-             page_name, tmp_path, global_repo_path,
-             page_name, tmp_path, global_repo_path);
-    system(commit_cmd);
-
-    unlink(tmp_path);
+             "cd %s && fossil branch new %s trunk >/dev/null 2>&1 || true",
+             workspace_path, branch_name);
+    system(cmd);
     return true;
 }
 
-// Read the human-facing change history for a ticket using `fossil ticket history`.
-// Returns bytes written to buffer, 0 on failure.
-int fossil_ticket_read_history(const char *ticket_id, char *buffer, size_t max_size) {
-    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
+static bool impl_branch_switch(VCSBackend *b, const char *workspace_path,
+                                const char *branch_name) {
+    (void)b;
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-             "fossil ticket history %.40s -R %s 2>/dev/null",
-             ticket_id, global_repo_path);
+             "cd %s && fossil update %s >/dev/null 2>&1",
+             workspace_path, branch_name);
+    return (system(cmd) == 0);
+}
+
+static bool impl_commit(VCSBackend *b, const char *workspace_path, const char *message) {
+    (void)b;
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "cd %s && fossil commit -m \"%s\"", workspace_path, message);
+    return run_cmd(cmd);
+}
+
+// ─── Agent definition files ──────────────────────────────────────────────────
+
+static int impl_list_agent_files(VCSBackend *b, const char *dir,
+                                  char out[][256], int max) {
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "fossil ls -r trunk -R %s 2>/dev/null", b->repo_id);
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
-    size_t total = 0;
-    int c;
-    while (total < max_size - 1 && (c = fgetc(fp)) != EOF)
-        buffer[total++] = (char)c;
-    buffer[total] = '\0';
+
+    int count = 0;
+    size_t dlen = strlen(dir);
+    char line[512];
+    while (fgets(line, sizeof(line), fp) && count < max) {
+        line[strcspn(line, "\n")] = 0;
+        if (strncmp(line, dir, dlen) == 0 && line[dlen] == '/') {
+            const char *ext = strrchr(line, '.');
+            if (ext && strcmp(ext, ".md") == 0) {
+                strncpy(out[count], line + dlen + 1, 255);
+                count++;
+            }
+        }
+    }
+    pclose(fp);
+    return count;
+}
+
+static int impl_read_agent_file(VCSBackend *b, const char *dir, const char *filename,
+                                 char *buf, size_t max) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "fossil cat \"%s\" -r trunk -R %s 2>/dev/null", path, b->repo_id);
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return 0;
+    size_t total = fread(buf, 1, max - 1, fp);
+    buf[total] = '\0';
     pclose(fp);
     return (int)total;
 }
 
-// Extract only the human-added icomment entries from ticket history.
-// These are the remarks the human types in the Fossil web UI — they are stored
-// as "Change icomment:" artifacts and are invisible in the ticket's comment column.
-// The full history can be 10KB+; this function returns only the small subset that
-// matters for plan feedback, so it always fits in the PULSE regardless of history size.
-int fossil_ticket_read_human_remarks(const char *ticket_id, char *buffer, size_t max_size) {
-    if (!global_repo_path[0] || !ticket_id || !buffer || max_size == 0) return 0;
-    char cmd[768];
-    snprintf(cmd, sizeof(cmd),
-             "fossil ticket history %.40s -R %s 2>/dev/null"
-             " | grep -B2 -A3 'icomment:'",
-             ticket_id, global_repo_path);
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return 0;
-    size_t total = 0;
-    int c;
-    while (total < max_size - 1 && (c = fgetc(fp)) != EOF)
-        buffer[total++] = (char)c;
-    buffer[total] = '\0';
-    pclose(fp);
-    return (int)total;
+// ─── Factory ─────────────────────────────────────────────────────────────────
+
+VCSBackend *fossil_backend_create(const char *repo_path) {
+    VCSBackend *b = calloc(1, sizeof(VCSBackend));
+    if (!b) return NULL;
+
+    strncpy(global_repo_path, repo_path, sizeof(global_repo_path) - 1);
+    strncpy(b->repo_id,       repo_path, sizeof(b->repo_id) - 1);
+    b->type = VCS_FOSSIL;
+
+    b->ticket_list                   = impl_ticket_list;
+    b->ticket_assign                 = impl_ticket_assign;
+    b->ticket_set_status             = impl_ticket_set_status;
+    b->ticket_set_reviewer_notes     = impl_ticket_set_reviewer_notes;
+    b->ticket_add_note               = impl_ticket_add_note;
+    b->ticket_append_log             = impl_ticket_append_log;
+    b->ticket_read_log               = impl_ticket_read_log;
+    b->ticket_read_human_remarks     = impl_ticket_read_human_remarks;
+    b->ticket_read_initial_description = impl_ticket_read_initial_description;
+    b->workspace_init                = impl_workspace_init;
+    b->branch_create                 = impl_branch_create;
+    b->branch_switch                 = impl_branch_switch;
+    b->commit                        = impl_commit;
+    b->list_agent_files              = impl_list_agent_files;
+    b->read_agent_file               = impl_read_agent_file;
+
+    return b;
 }
