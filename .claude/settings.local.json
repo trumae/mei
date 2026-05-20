@@ -151,7 +151,8 @@
       "Bash(echo \"Exit: $?\")",
       "Bash(echo \"#3 → Review: $?\")",
       "Bash(echo \"#7 → Planned/coder: $?\")",
-      "Bash(tmux ls *)"
+      "Bash(tmux ls *)",
+      "Bash(gh pr *)"
     ]
   }
 }

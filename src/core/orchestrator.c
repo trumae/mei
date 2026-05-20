@@ -525,6 +525,28 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         snprintf(branch_name, sizeof(branch_name), "tkt-%.8s", a->current_ticket);
                     }
 
+                    // Pre-compute parent feature branch (GitHub only, needed before branch creation).
+                    // Sub-issues branch from the parent feature branch so all their changes
+                    // accumulate there and are eventually PR'd to main as a unit.
+                    char pre_parent_branch[64] = {0};
+                    if (g_backend->type == VCS_GITHUB) {
+                        for (int t = 0; t < tkt_count; t++) {
+                            if (strcmp(tickets[t].uuid, a->current_ticket) != 0) continue;
+                            const char *pp2 = strstr(tickets[t].description, "[parent:");
+                            if (pp2) {
+                                const char *s2 = pp2 + 8, *e2 = strchr(s2, ']');
+                                if (e2 && (size_t)(e2 - s2) < 64) {
+                                    char puid2[72] = {0};
+                                    strncpy(puid2, s2, (size_t)(e2 - s2));
+                                    int _pn = (puid2[0] == '#') ? atoi(puid2 + 1) : atoi(puid2);
+                                    snprintf(pre_parent_branch, sizeof(pre_parent_branch),
+                                             "mei/issue-%d", _pn);
+                                }
+                            }
+                            break;
+                        }
+                    }
+
                     // For implementation roles, create the ticket branch in the
                     // repository and switch the workspace to it before sending the
                     // PULSE. The agent only needs to sync to the branch (fossil update
@@ -534,16 +556,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         strcmp(a->role, "researcher") == 0) {
                         char workspace[256];
                         snprintf(workspace, sizeof(workspace), "/tmp/workspaces/%s", a->name);
+                        // Sub-issue on GitHub: branch from parent feature branch so each
+                        // sub-issue's changes accumulate on the parent branch.
+                        if (pre_parent_branch[0])
+                            g_backend->branch_switch(g_backend, workspace, pre_parent_branch);
                         g_backend->branch_create(g_backend, workspace, branch_name);
                         g_backend->branch_switch(g_backend, workspace, branch_name);
                         char branch_log[128];
                         snprintf(branch_log, sizeof(branch_log),
-                                 "[branch] Created/switched workspace %s → %s",
-                                 a->name, branch_name);
+                                 "[branch] Created/switched workspace %s → %s (base: %s)",
+                                 a->name, branch_name,
+                                 pre_parent_branch[0] ? pre_parent_branch : "main");
                         log_message(branch_log);
                     } else {
                         char workspace[256];
                         snprintf(workspace, sizeof(workspace), "/tmp/workspaces/%s", a->name);
+                        // Planner in Phase 2: create the parent feature branch now so coders
+                        // can branch from it. branch_create is idempotent — safe to re-call.
+                        if (g_backend->type == VCS_GITHUB && a->doing_phase2)
+                            g_backend->branch_create(g_backend, workspace, branch_name);
                         const char *default_branch = (g_backend->type == VCS_GITHUB) ? "main" : "trunk";
                         g_backend->branch_switch(g_backend, workspace, default_branch);
                     }
@@ -764,6 +795,14 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     // ── Backend-specific command strings for PULSE messages ──────────────────
                     int _is_gh = (g_backend->type == VCS_GITHUB);
                     char _tkt_addr[32];   // numeric issue# for GitHub, UUID for Fossil
+
+                    // Parent feature branch name (GitHub only): sub-issues merge here;
+                    // planner QA inspects here; the final PR targets main from here.
+                    char parent_branch_name[64] = {0};
+                    if (_is_gh && parent_uuid[0]) {
+                        int _pn = (parent_uuid[0] == '#') ? atoi(parent_uuid + 1) : atoi(parent_uuid);
+                        snprintf(parent_branch_name, sizeof(parent_branch_name), "mei/issue-%d", _pn);
+                    }
                     if (_is_gh) {
                         int _n = (a->current_ticket[0] == '#') ? atoi(a->current_ticket + 1)
                                                                : atoi(a->current_ticket);
@@ -858,10 +897,18 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     (void)_cmd_notes_reviewer;
 
                     // Workspace sync
-                    char _cmd_sync_trunk[128], _cmd_sync_branch[256];
+                    char _cmd_sync_trunk[192], _cmd_sync_branch[256];
                     if (_is_gh) {
-                        strncpy(_cmd_sync_trunk, "git checkout main && git pull origin main",
-                                sizeof(_cmd_sync_trunk) - 1);
+                        if (a->doing_qa) {
+                            // QA: planner inspects the parent feature branch where all
+                            // sub-issue merges landed, not main.
+                            snprintf(_cmd_sync_trunk, sizeof(_cmd_sync_trunk),
+                                     "git fetch origin && git checkout '%s' && git pull origin '%s'",
+                                     branch_name, branch_name);
+                        } else {
+                            strncpy(_cmd_sync_trunk, "git checkout main && git pull origin main",
+                                    sizeof(_cmd_sync_trunk) - 1);
+                        }
                         // Always fetch + reset --hard so the reviewer gets the latest push,
                         // not a stale local copy from a previous review cycle.
                         snprintf(_cmd_sync_branch, sizeof(_cmd_sync_branch),
@@ -888,14 +935,18 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->current_ticket);
 
                     // Post-commit verification
-                    char _cmd_branch_verify[128], _cmd_ws_status[64], _cmd_diff[64];
+                    char _cmd_branch_verify[128], _cmd_ws_status[64], _cmd_diff[96];
                     if (_is_gh) {
                         strncpy(_cmd_branch_verify, "git branch --show-current",
                                 sizeof(_cmd_branch_verify) - 1);
                         strncpy(_cmd_ws_status, "git status | head -3",
                                 sizeof(_cmd_ws_status) - 1);
-                        strncpy(_cmd_diff, "git diff main...HEAD",
-                                sizeof(_cmd_diff) - 1);
+                        // Sub-issue: diff against parent feature branch; top-level: diff main
+                        if (parent_branch_name[0])
+                            snprintf(_cmd_diff, sizeof(_cmd_diff),
+                                     "git diff '%s'...HEAD", parent_branch_name);
+                        else
+                            strncpy(_cmd_diff, "git diff main...HEAD", sizeof(_cmd_diff) - 1);
                     } else {
                         strncpy(_cmd_branch_verify, "fossil info | grep tags",
                                 sizeof(_cmd_branch_verify) - 1);
@@ -905,14 +956,27 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                 sizeof(_cmd_diff) - 1);
                     }
 
-                    // Reviewer merge flow
+                    // Reviewer merge flow.
+                    // For sub-issues: merge into the parent feature branch (not main).
+                    // The parent branch accumulates all sub-issue merges and is eventually
+                    // PR'd to main by the planner after QA.
+                    const char *_merge_base = parent_branch_name[0] ? parent_branch_name : "main";
                     char _cmd_merge[512], _cmd_after_merge[256];
                     if (_is_gh) {
-                        snprintf(_cmd_merge, sizeof(_cmd_merge),
-                                 "git checkout main && git pull origin main && \\\n"
-                                 "  git merge --no-ff '%s' -m \"Merge %s: %s\" "
-                                 "&& git push origin main",
-                                 branch_name, branch_name, tkt_info.title);
+                        if (parent_branch_name[0]) {
+                            snprintf(_cmd_merge, sizeof(_cmd_merge),
+                                     "git fetch origin && git checkout '%s' && git pull origin '%s' && \\\n"
+                                     "  git merge --no-ff '%s' -m \"Merge %s: %s\" && git push origin '%s'",
+                                     parent_branch_name, parent_branch_name,
+                                     branch_name, branch_name, tkt_info.title,
+                                     parent_branch_name);
+                        } else {
+                            snprintf(_cmd_merge, sizeof(_cmd_merge),
+                                     "git checkout main && git pull origin main && \\\n"
+                                     "  git merge --no-ff '%s' -m \"Merge %s: %s\" "
+                                     "&& git push origin main",
+                                     branch_name, branch_name, tkt_info.title);
+                        }
                         strncpy(_cmd_after_merge, "(already pushed in merge step above)",
                                 sizeof(_cmd_after_merge) - 1);
                     } else {
@@ -923,6 +987,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "fossil tag add closed %s tip",
                                  branch_name, tkt_info.title, branch_name);
                     }
+                    (void)_merge_base;
 
                     // Sub-ticket creation example (planner Phase 2)
                     char _cmd_create_sub[768];
@@ -943,6 +1008,25 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "  status \"Planned\" \\\n"
                                  "  private_contact \"<full agent hash from AVAILABLE AGENTS>\"",
                                  a->current_ticket);
+
+                    // PR creation command: planner runs this after QA approval (GitHub only).
+                    // Creates a PR from the parent feature branch to main for human review.
+                    char _cmd_create_pr[512] = {0};
+                    char _qa_pr_step[700]    = {0};
+                    if (_is_gh && a->doing_qa) {
+                        snprintf(_cmd_create_pr, sizeof(_cmd_create_pr),
+                                 "gh pr create -R '%s' --base main --head '%s' \\\n"
+                                 "  --title \"[MEI] %s\" \\\n"
+                                 "  --body \"All sub-tasks completed and QA passed. "
+                                 "Human review and merge to main required.\"",
+                                 g_backend->repo_id, branch_name, tkt_info.title);
+                        snprintf(_qa_pr_step, sizeof(_qa_pr_step),
+                                 "   Then open a Pull Request to main for human review:\n"
+                                 "     %s\n"
+                                 "   !! The PR must be reviewed and merged by a human.\n"
+                                 "   !! The orchestrator will NOT monitor or merge the PR.\n",
+                                 _cmd_create_pr);
+                    }
 
                     // Dependency sequencing note
                     char _dep_seq_note[512];
@@ -1067,7 +1151,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   - If NEEDS IMPROVEMENT: exact issues and what sub-tasks must fix them\n\n"
                                  "STEP 4a — If ALL deliverables are satisfactory:\n"
                                  "     %s\n"
-                                 "   This closes the overall task permanently.\n\n"
+                                 "%s"
+                                 "   This closes the parent issue permanently.\n\n"
                                  "STEP 4b — If quality needs improvement, create fix sub-tickets:\n"
                                  "   REUSE existing work — do not re-implement what is already correct.\n"
                                  "   Only create sub-tickets for the specific gaps found.\n"
@@ -1081,7 +1166,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "!! Do NOT create review sub-tickets — review is automatic.\n",
                                  _cmd_sync_trunk,
                                  wiki_page, wiki_cmd,
-                                 _cmd_set_done,
+                                 _cmd_set_done, _qa_pr_step,
                                  _cmd_create_sub,
                                  _cmd_set_delegated);
                     } else if (subtasks_ctx[0]) {
@@ -1347,7 +1432,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   with reason: \"Cannot checkout branch %s\".\n"
                                  "3. Verify the coder's work exists:\n"
                                  "     %s\n"
-                                 "   If the diff is EMPTY, run: git log --oneline main..HEAD\n"
+                                 "   If the diff is EMPTY, run: git log --oneline %s..HEAD\n"
                                  "   No commits = nothing to review → set ticket to Rework:\n"
                                  "   \"No code found on branch %s — coder did not push changes.\"\n"
                                  "4. Read EVERY file that was changed (from the diff above).\n"
@@ -1373,7 +1458,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   - Whether each requirement in the ticket spec was met (yes/no + evidence)\n"
                                  "   - VERDICT: APPROVED or REJECTED\n"
                                  "   - If REJECTED: specific issues with file names, line numbers, exact errors\n"
-                                 "8. If ALL requirements met AND build passed — merge into the main branch:\n"
+                                 "8. If ALL requirements met AND build passed — merge into '%s':\n"
                                  "     %s\n"
                                  "   Then re-run the same build command you used in step 5 to verify the\n"
                                  "   merged result still compiles cleanly.\n"
@@ -1401,8 +1486,10 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  branch_name,
                                  branch_name,
                                  _cmd_diff,
+                                 _merge_base,   // git log --oneline <base>..HEAD
                                  branch_name,
                                  wiki_page, wiki_cmd,
+                                 _merge_base,   // "merge into '<base>'"
                                  _cmd_merge,
                                  _cmd_after_merge,
                                  _cmd_set_done,
