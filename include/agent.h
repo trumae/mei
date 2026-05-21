@@ -18,7 +18,7 @@ typedef struct {
     char role[64];
     char cli[64];
     char cmd[512];
-    char hash[41];
+    char hash[64];  // agent identifier used in assignee labels — set to agent name
     char description[MEI_TEXT_BUFFER_SIZE];
     char capabilities[256];
     AgentState state;

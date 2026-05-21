@@ -82,18 +82,12 @@ static int parse_agent_from_buffer(const char *buf, Agent *a) {
         if (*p == '\n') p++;
     }
 
-    // Compute SHA1 hash of the agent name for private_contact matching
-    if (a->name[0]) {
-        char hash_cmd[256];
-        snprintf(hash_cmd, sizeof(hash_cmd),
-                 "printf '%%s' \"%s\" | shasum | cut -d' ' -f1", a->name);
-        FILE *hash_fp = popen(hash_cmd, "r");
-        if (hash_fp) {
-            if (fgets(a->hash, sizeof(a->hash), hash_fp))
-                a->hash[strcspn(a->hash, "\n \t")] = 0;
-            pclose(hash_fp);
-        }
-    }
+    // Agent identifier used in assignee labels — use the name directly.
+    // This makes GitHub labels human-readable ("assignee:coder" instead of
+    // "assignee:77df854a..."). Names must be unique within a repo, which is
+    // already enforced by having one .mei/<name>.md file per agent.
+    if (a->name[0])
+        strncpy(a->hash, a->name, sizeof(a->hash) - 1);
 
     // Strip trailing whitespace from all string fields
     trim_trailing_whitespace(a->name);

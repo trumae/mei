@@ -24,6 +24,17 @@ static int trust_accepted[MAX_AGENTS] = {0};
 static unsigned long last_pane_hash[MAX_AGENTS] = {0};
 static int pane_idle_ticks[MAX_AGENTS] = {0};
 
+// Recently-completed cache: short-lived override for tickets whose final status
+// was set by the orchestrator but hasn't propagated through the API cache yet.
+// Prevents stale "Open"/"In Progress" from the GitHub API from re-dispatching
+// agents onto tickets that are already at a terminal/waiting state (e.g.
+// "Pending Approval" looping back to the planner within 1-2 ticks).
+#define RC_SIZE 20
+static char rc_uuid[RC_SIZE][64];
+static char rc_status[RC_SIZE][64];
+static int  rc_ttl[RC_SIZE];
+static int  rc_count = 0;
+
 // djb2 hash — fast, no dependencies, good enough for change detection.
 static unsigned long hash_pane(const char *s, int len) {
     unsigned long h = 5381;
@@ -91,9 +102,10 @@ void orchestrator_init(Agent *agents, int *agent_count) {
         g_backend->workspace_init(g_backend, workspace);
 
         if (!tmux_session_exists(agents[i].name)) {
-            // Write a small runner script to prevent window from closing immediately on error
+            // Runner script lives in /tmp — NOT inside the workspace — so it can
+            // never be accidentally staged and committed by an agent.
             char runner_path[512];
-            snprintf(runner_path, sizeof(runner_path), "%s/.mei_runner.sh", workspace);
+            snprintf(runner_path, sizeof(runner_path), "/tmp/mei_%s_runner.sh", agents[i].name);
             FILE *f = fopen(runner_path, "w");
             if (f) {
                 fprintf(f, "#!/bin/bash\n%s\necho \"\"\necho \"Agent process exited ($?). Press Enter to close.\"\nread\n", agents[i].cmd);
@@ -101,8 +113,8 @@ void orchestrator_init(Agent *agents, int *agent_count) {
                 char chmod_cmd[512];
                 snprintf(chmod_cmd, sizeof(chmod_cmd), "chmod +x %s", runner_path);
                 system(chmod_cmd);
-                
-                tmux_spawn_agent(agents[i].name, "./.mei_runner.sh", workspace);
+
+                tmux_spawn_agent(agents[i].name, runner_path, workspace);
             } else {
                 // Fallback
                 tmux_spawn_agent(agents[i].name, agents[i].cmd, workspace);
@@ -154,6 +166,33 @@ void orchestrator_tick(Agent *agents, int agent_count) {
     static int tick_counter = 0;
     tick_counter++;
     int tkt_count = g_backend->ticket_list(g_backend, tickets, 100);
+
+    // Decrement RC cache TTLs; expire stale entries; override API-stale statuses.
+    // The GitHub API can lag 1-3 ticks after a label change — the RC cache holds
+    // the authoritative final_status until propagation catches up.
+    for (int r = rc_count - 1; r >= 0; r--) {
+        if (--rc_ttl[r] <= 0) {
+            rc_uuid[r][0] = rc_status[r][0] = '\0';
+            if (r < rc_count - 1) {
+                memmove(rc_uuid[r],   rc_uuid[r+1],   (size_t)(rc_count-r-1) * sizeof rc_uuid[0]);
+                memmove(rc_status[r], rc_status[r+1], (size_t)(rc_count-r-1) * sizeof rc_status[0]);
+                memmove(&rc_ttl[r],   &rc_ttl[r+1],   (size_t)(rc_count-r-1) * sizeof rc_ttl[0]);
+            }
+            rc_count--;
+        }
+    }
+    // Override any API-stale status with what the orchestrator last set.
+    // Covers: stale "Open"/"" after PA/Done writes AND stale "Rework"/"Review"
+    // after the orchestrator re-dispatches an agent (sets "In Progress").
+    for (int t = 0; t < tkt_count; t++) {
+        for (int r = 0; r < rc_count; r++) {
+            if (strcmp(tickets[t].uuid, rc_uuid[r]) == 0) {
+                if (strcasecmp(tickets[t].status, rc_status[r]) != 0)
+                    strncpy(tickets[t].status, rc_status[r], sizeof(tickets[t].status) - 1);
+                break;
+            }
+        }
+    }
 
     // When a "Pending Approval" ticket is routed to the planner again due to the
     // orchestrator's direct SQL UPDATE racing with the planner's artifact-based status
@@ -336,6 +375,22 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                 // don't see this ticket as available and claim it concurrently.
                 strncpy(tickets[t].assignee, a->hash,      sizeof(tickets[t].assignee) - 1);
                 strncpy(tickets[t].status,   "In Progress", sizeof(tickets[t].status)   - 1);
+                // Register dispatch in RC cache so that stale GitHub API responses
+                // (Rework/Review/etc. lingering after our ticket_set_status call) don't
+                // trigger a false completion on the first 1-3 ticks after dispatch.
+                // TTL=5 (10s): covers typical GitHub label-propagation lag.
+                {
+                    int _rc_s = -1;
+                    for (int _r = 0; _r < rc_count; _r++) {
+                        if (strcmp(rc_uuid[_r], tickets[t].uuid) == 0) { _rc_s = _r; break; }
+                    }
+                    if (_rc_s < 0 && rc_count < RC_SIZE) _rc_s = rc_count++;
+                    if (_rc_s >= 0) {
+                        strncpy(rc_uuid[_rc_s],   tickets[t].uuid, sizeof(rc_uuid[0]) - 1);
+                        strncpy(rc_status[_rc_s], "In Progress",   sizeof(rc_status[0]) - 1);
+                        rc_ttl[_rc_s] = 5;
+                    }
+                }
 
                 strncpy(a->current_ticket, tickets[t].uuid, sizeof(a->current_ticket) - 1);
                 a->state = AGENT_STATE_IN_PROGRESS;
@@ -383,6 +438,29 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     }
                 }
                 if (!still_active) {
+                    // Reviewer-specific guard: only "Done" or "Rework" are valid reviewer
+                    // handoffs. Any other status ("Open", "", "Review", "In Progress") is a
+                    // race-condition artifact — the coder's background pane can race with the
+                    // orchestrator's ticket_set_status("In Progress") call, leaving the issue
+                    // with no status label for several ticks. Stay active until a real final
+                    // state is set; MAX_STEPS handles true stalls.
+                    if (strcmp(a->role, "reviewer") == 0) {
+                        // Reviewer stays active for transient/race-condition states.
+                        // Valid exits: Done (approved), Rework (rejected),
+                        //              Blocked (reviewer escalated),
+                        //              Planned (planner took over after block resolution).
+                        // "Open", "", "Review", "In Progress" are race-condition artifacts.
+                        int reviewer_transitional =
+                            (final_status[0] == '\0'                         ||
+                             strcasecmp(final_status, "Open")        == 0    ||
+                             strcasecmp(final_status, "Review")      == 0    ||
+                             strcasecmp(final_status, "In Progress") == 0);
+                        if (reviewer_transitional) {
+                            open_settling_ticks[i] = 0;
+                            continue;
+                        }
+                    }
+
                     // Settling guard: "Open"/empty and "In Progress" are not valid handoff
                     // states. "Open" appears transiently between the remove-label and
                     // add-label of a status change. "In Progress" appears when the assignee
@@ -423,6 +501,23 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         log_message("[review] Cleared assignee — ticket submitted for review");
                     }
 
+                    // When the planner resolves a block and sets the ticket back to
+                    // "Planned", it leaves its own hash as assignee. The coder won't
+                    // pick it up because the assignee is a known-but-wrong agent.
+                    // Clear the assignee so the ticket becomes unassigned_planned_sub
+                    // and the coder can re-acquire it normally.
+                    if (strcasecmp(final_status, "Planned") == 0 &&
+                        strcmp(a->role, "planner") == 0) {
+                        g_backend->ticket_assign(g_backend, a->current_ticket, "");
+                        for (int t = 0; t < tkt_count; t++) {
+                            if (strcmp(tickets[t].uuid, a->current_ticket) == 0) {
+                                tickets[t].assignee[0] = '\0';
+                                break;
+                            }
+                        }
+                        log_message("[unblock] Planner cleared assignee on Planned ticket — executor can re-acquire");
+                    }
+
                     if (strcasecmp(final_status, "Rework") == 0 &&
                         strcmp(a->role, "reviewer") == 0) {
                         for (int j = 0; j < agent_count; j++) {
@@ -457,6 +552,37 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  a->role, final_status[0] ? final_status : "unknown");
                     }
                     g_backend->ticket_append_log(g_backend, a->current_ticket, a->name, wiki_msg);
+
+                    // Register this ticket's authoritative final_status in the RC
+                    // cache for RC_SIZE ticks so stale API responses don't re-dispatch
+                    // an agent onto an already-completed/waiting ticket.
+                    {
+                        int rc_slot = -1;
+                        for (int r = 0; r < rc_count; r++) {
+                            if (strcmp(rc_uuid[r], a->current_ticket) == 0) {
+                                rc_slot = r; break;
+                            }
+                        }
+                        if (rc_slot < 0 && rc_count < RC_SIZE)
+                            rc_slot = rc_count++;
+                        if (rc_slot >= 0) {
+                            strncpy(rc_uuid[rc_slot],   a->current_ticket,
+                                    sizeof(rc_uuid[0]) - 1);
+                            strncpy(rc_status[rc_slot], final_status[0] ? final_status : "Pending Approval",
+                                    sizeof(rc_status[0]) - 1);
+                            rc_ttl[rc_slot] = 8;
+                        }
+                        // Also update the in-memory snapshot so this tick's routing
+                        // loop sees the correct final status immediately.
+                        for (int t = 0; t < tkt_count; t++) {
+                            if (strcmp(tickets[t].uuid, a->current_ticket) == 0) {
+                                if (final_status[0])
+                                    strncpy(tickets[t].status, final_status,
+                                            sizeof(tickets[t].status) - 1);
+                                break;
+                            }
+                        }
+                    }
 
                     // Preserve phase2 flag so is_recovery re-dispatch restores it if
                     // the cache hasn't propagated the planner's status change yet.
@@ -911,8 +1037,10 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                         }
                         // Always fetch + reset --hard so the reviewer gets the latest push,
                         // not a stale local copy from a previous review cycle.
+                        // git clean removes any untracked files that would block checkout
+                        // (e.g. runner scripts from previous sessions left in the workspace).
                         snprintf(_cmd_sync_branch, sizeof(_cmd_sync_branch),
-                                 "git fetch origin && "
+                                 "git fetch origin && git clean -fd 2>/dev/null || true && "
                                  "(git checkout '%s' || git checkout -b '%s' origin/'%s') && "
                                  "git reset --hard origin/'%s'",
                                  branch_name, branch_name, branch_name, branch_name);
@@ -926,7 +1054,8 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                     char _cmd_commit_example[256];
                     if (_is_gh)
                         snprintf(_cmd_commit_example, sizeof(_cmd_commit_example),
-                                 "git add -A && git commit -m \"Implement %s: <summary>\" "
+                                 "git add -A && git restore --staged .mei_runner.sh 2>/dev/null || true\n"
+                                 "     git commit -m \"Implement %s: <summary>\" "
                                  "&& git push -u origin HEAD",
                                  _tkt_addr);
                     else
@@ -1367,6 +1496,9 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   circumstances — the reviewer will reject it and you will redo the work.\n"
                                  "6. COMMIT only after a clean build:\n"
                                  "     %s\n"
+                                 "   !! NEVER stage or commit '.mei_runner.sh' — it is an orchestrator\n"
+                                 "   control file. The commit template above already unstages it.\n"
+                                 "   Also verify your .gitignore excludes build artifacts (*.o, binaries).\n"
                                  "   After committing, verify the commit landed on the right branch:\n"
                                  "     %s\n"
                                  "   If it shows the main branch, your commit went to the wrong place — STOP\n"
@@ -1428,8 +1560,11 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  "   Then verify you are on the correct branch:\n"
                                  "     %s\n"
                                  "   The output MUST show '%s'.\n"
-                                 "   If NOT — do not proceed with the review. Set the ticket to Blocked\n"
-                                 "   with reason: \"Cannot checkout branch %s\".\n"
+                                 "   If NOT — do not proceed. Run EXACTLY this command to block the ticket:\n"
+                                 "     %s\n"
+                                 "   Then add a comment explaining the branch checkout failure.\n"
+                                 "   NEVER use --add-label alone — always use the full command above which\n"
+                                 "   removes all other status labels atomically.\n"
                                  "3. Verify the coder's work exists:\n"
                                  "     %s\n"
                                  "   If the diff is EMPTY, run: git log --oneline %s..HEAD\n"
@@ -1484,7 +1619,7 @@ void orchestrator_tick(Agent *agents, int agent_count) {
                                  _cmd_sync_branch,
                                  _cmd_branch_verify,
                                  branch_name,
-                                 branch_name,
+                                 _cmd_set_blocked,  // exact command for branch checkout failure
                                  _cmd_diff,
                                  _merge_base,   // git log --oneline <base>..HEAD
                                  branch_name,
